@@ -104,10 +104,30 @@ def trace_cmd(
         console.print(Panel(rec_text, title="💡 Recomendaciones Pedagógicas", border_style="yellow"))
 
 
+def generar_seccion_markdown(reportes: list) -> str:
+    """Genera sección de análisis de recursión y stack frames para Dredd."""
+    lines = ["## Análisis de Recursión y Consumo de Pila (Sebastian)\n"]
+    recursivas = [r for r in reportes if r.es_recursiva]
+    lines.append(f"- **Funciones analizadas:** {len(reportes)}")
+    lines.append(f"- **Funciones recursivas:** {len(recursivas)}\n")
+    if not recursivas:
+        lines.append("> [!TIP]\n> **Flujo Iterativo:** No se detectaron funciones recursivas en el módulo analizado.\n")
+    else:
+        lines.append("| Función | Línea | Tipo Recursión | Caso Base | Bytes/Frame | Riesgo Overflow |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+        for r in recursivas:
+            cb_str = "✓ Sí" if r.tiene_caso_base else "❌ No"
+            lines.append(f"| `{r.funcion}()` | {r.linea_inicio} | {r.tipo_recursion} | {cb_str} | ~{r.consumo_stack_por_frame_bytes} B | **{r.riesgo_overflow}** |")
+        lines.append("")
+    return "\n".join(lines)
+
+
 @app.command("analyze")
+@app.command("check")
 def analyze_cmd(
     fuente: Path = typer.Argument(..., help="Archivo C a analizar estáticamente."),
     json_output: bool = typer.Option(False, "--json", help="Emitir reporte en JSON."),
+    output_md: Optional[Path] = typer.Option(None, "--md", "--output-md", "-o", help="Generar sección de reporte en formato Markdown para fusión en Dredd."),
 ) -> None:
     """Analiza estáticamente todas las funciones del archivo en busca de recursión y riesgos de desbordamiento."""
     if not fuente.is_file():
@@ -121,6 +141,13 @@ def analyze_cmd(
     for fn_name, cuerpo, l_start, _ in funciones:
         diag = analizar_estatico_funcion(fn_name, cuerpo, fuente, l_start)
         reportes.append(diag)
+
+    if output_md:
+        md_text = generar_seccion_markdown(reportes)
+        output_md.parent.mkdir(parents=True, exist_ok=True)
+        output_md.write_text(md_text, encoding="utf-8")
+        console.print(f"[green]✓ Sección Markdown generada en:[/green] [cyan]{output_md}[/cyan]")
+        raise typer.Exit(code=0)
 
     if json_output:
         print(json.dumps([r.to_dict() for r in reportes], indent=2, ensure_ascii=False))
@@ -160,6 +187,30 @@ def analyze_cmd(
 
     console.print(tabla)
     console.print(f"[dim]Total funciones: {len(reportes)} · Recursivas detectadas: {recursivas_count}[/dim]")
+
+
+@app.command("report")
+def report_cmd(
+    fuente: Path = typer.Argument(..., help="Archivo C a analizar."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Ruta de destino del archivo Markdown."),
+) -> None:
+    """Genera directamente la sección de reporte Markdown de SEBASTIAN para Dredd."""
+    if not fuente.is_file():
+        err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
+        raise typer.Exit(code=2)
+    contenido = fuente.read_text(encoding="utf-8")
+    funciones = extraer_funciones_c(contenido)
+    reportes = []
+    for fn_name, cuerpo, l_start, _ in funciones:
+        diag = analizar_estatico_funcion(fn_name, cuerpo, fuente, l_start)
+        reportes.append(diag)
+    md_content = generar_seccion_markdown(reportes)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(md_content, encoding="utf-8")
+        console.print(f"[green]✓ Reporte Markdown generado en:[/green] [cyan]{output}[/cyan]")
+    else:
+        print(md_content)
 
 
 def main() -> None:
