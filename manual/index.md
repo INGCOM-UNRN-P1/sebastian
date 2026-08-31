@@ -345,3 +345,12 @@ Podés encadenar `sebastian` con otras herramientas del ecosistema en una única
 sebastian tree src/recursivo.c --format mermaid -o arbol.md
 ````
 
+---
+
+(manual-sebastian-seccion-plugins)=
+## 9. Extensión, Desarrollo de Plugins y API Python
+
+Para crear tus propias reglas, conectores de evaluación o integrar `sebastian` programáticamente en pipelines de CI/CD:
+
+- 👉 **Consultá la guía completa:** [Guía de Extensión y Creación de Plugins](plugins.md)
+
