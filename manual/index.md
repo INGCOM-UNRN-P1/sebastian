@@ -173,3 +173,54 @@ check-sebastian:
 ````
 
 Ejecutá `make check-sebastian` antes de cada commit para asegurar que tu código conserve el estado de aprobación.
+
+---
+
+(manual-sebastian-arquitectura)=
+## 7. Arquitectura Interna y Mecanismo Técnico
+
+La herramienta **`sebastian`** implementa un motor de alta precisión basado en:
+
+- **Tecnología Núcleo:** `Tree-Sitter C AST Recursion Matcher + Stack Frame Size Evaluator + Mermaid Call Tree Generator`.
+- **Aislamiento y Determinismo:** Diseñada para operar sin efectos colaterales en entornos de integración continua (CI), terminales de estudiantes y servidores docentes headless.
+- **Manejo de Errores Pedagógico:** Todo fallo de sintaxis, memoria o lógica se traduce en una acción prescriptiva concreta con su respectiva justificación técnica.
+
+---
+
+(manual-sebastian-ecosistema)=
+## 8. Integración y Conexión con el Ecosistema
+
+````{note}
+Ninguna herramienta opera de forma aislada. **`sebastian`** forma parte del pipeline integral de evaluación, verificación y enseñanza de la cátedra.
+````
+
+### Diagrama de Flujo e Interoperabilidad
+
+````{mermaid}
+graph TD
+    SRC[Código C Recursivo] --> SEB[Sebastian: Análisis de Recursión]
+    SEB -->|Verificación de Caso Base| AST[Tree-Sitter C Engine]
+    SEB -->|Árbol de Llamadas Mermaid| MYST[Myst-Tools: Apuntes y Guías]
+    SEB -->|Profundidad de Stack| BSH[Bishop: Inspector de Memoria]
+    SEB -->|Alerta de Stack Overflow| HAL[Hal: Forense de Crashes]
+````
+
+### Matriz de Intercambio de Datos
+
+| Canal | Herramientas Conectadas | Tipo de Datos Transferidos |
+| :--- | :--- | :--- |
+| **Entradas (Inputs)** | - `Funciones recursivas en C` | Código fuente, AST, binarios, testcases, contratos |
+| **Salidas (Outputs)** | - `bishop (visualización de marcos)`
+- `myst-tools (diagramas de árbol)`
+- `hal (prevención de stack overflow)` | Informes Markdown, diagnósticos Rich, JSON, actas |
+| **Sincronización** | `bishop`, `giger`, `hal` | Validación cruzada, flags compartidos y autofix |
+
+### Pipeline de Integración Recomendado
+
+Podés encadenar `sebastian` con otras herramientas del ecosistema en una única línea de comando:
+
+````{code-block} bash
+# Pipeline de integración típico
+sebastian tree src/recursivo.c --format mermaid -o arbol.md
+````
+
