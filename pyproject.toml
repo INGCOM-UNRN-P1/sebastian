@@ -17,6 +17,9 @@ dependencies = [
 [project.scripts]
 sebastian = "sebastian.cli:main"
 
+[project.entry-points."ripley.plugins"]
+sebastian = "sebastian.ripley_plugin:SebastianPlugin"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/sebastian"]
 
