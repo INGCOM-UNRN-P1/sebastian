@@ -174,31 +174,34 @@ def trazar_recursion_dinamica(
         fuente_inst = tmp_path / "instrumentado.c"
         fuente_inst.write_text(codigo_instrumentado, encoding="utf-8")
 
-        gcc = shutil.which("gcc") or "gcc"
-        res_comp = subprocess.run(
-            [gcc, "-g", "-O0", "-std=c11", str(fuente_inst), "-o", str(binario), "-lm"],
-            capture_output=True,
-            text=True,
-        )
+        gcc = shutil.which("gcc")
+        if gcc:
+            res_comp = subprocess.run(
+                [gcc, "-g", "-O0", "-std=c11", str(fuente_inst), "-o", str(binario), "-lm"],
+                capture_output=True,
+                text=True,
+            )
 
-        if res_comp.returncode == 0:
-            try:
-                res_run = subprocess.run(
-                    [str(binario)] + (args_programa or []),
-                    input=stdin_data,
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
-                arbol, max_depth, total_calls = _parsear_trazas_instrumentadas(res_run.stdout, nombre_fn)
-                if arbol:
-                    diag_estatico.arbol = arbol
-                    diag_estatico.profundidad_maxima = max_depth
-                    diag_estatico.total_llamadas = total_calls
-                    diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
-                    return diag_estatico
-            except Exception:
-                pass
+            if res_comp.returncode == 0:
+                try:
+                    res_run = subprocess.run(
+                        [str(binario)] + (args_programa or []),
+                        input=stdin_data,
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    arbol, max_depth, total_calls = _parsear_trazas_instrumentadas(
+                        res_run.stdout, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
+                    )
+                    if arbol:
+                        diag_estatico.arbol = arbol
+                        diag_estatico.profundidad_maxima = max_depth
+                        diag_estatico.total_llamadas = total_calls
+                        diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
+                        return diag_estatico
+                except Exception:
+                    pass
 
     # Fallback si falló la instrumentación dinámica: generar árbol sintético
     arbol_sintetico = NodoLlamada(
@@ -215,7 +218,7 @@ def trazar_recursion_dinamica(
                 argumentos="base",
                 profundidad=2,
                 retorno="1",
-                stack_bytes=diag_estatico.consumo_stack_por_frame_bytes * 2,
+                stack_bytes=2 * diag_estatico.consumo_stack_por_frame_bytes,
             )
         ],
     )
@@ -230,18 +233,42 @@ def _generar_codigo_instrumentado(codigo_original: str, funcion_target: str) -> 
     """Inserta macros y hooks de logging en la función C."""
     header = """
 #include <stdio.h>
+
 static int __seb_call_id = 0;
 static int __seb_depth = 0;
-#define __SEB_ENTER(fn) int __my_id = ++__seb_call_id; ++__seb_depth; fprintf(stdout, "[SEB:ENTER:%d:%d:%s]\\n", __my_id, __seb_depth, fn); fflush(stdout);
-#define __SEB_EXIT(ret) fprintf(stdout, "[SEB:EXIT:%d:%d]\\n", __my_id, __seb_depth); fflush(stdout); --__seb_depth;
+
+typedef struct {
+    int id;
+    int depth;
+} __seb_scope_t;
+
+static inline void __seb_exit_hook(__seb_scope_t *s) {
+    fprintf(stdout, "[SEB:EXIT:%d:%d]\\n", s->id, s->depth);
+    fflush(stdout);
+    --__seb_depth;
+}
+
+static inline void __seb_enter_hook(const char *fn, int *my_id, int *my_depth) {
+    *my_id = ++__seb_call_id;
+    *my_depth = ++__seb_depth;
+    fprintf(stdout, "[SEB:ENTER:%d:%d:%s]\\n", *my_id, *my_depth, fn);
+    fflush(stdout);
+}
+
+#define __SEB_ENTER(fn) \\
+    int __my_id, __my_depth; \\
+    __seb_enter_hook(fn, &__my_id, &__my_depth); \\
+    __seb_scope_t __my_scope __attribute__((cleanup(__seb_exit_hook))) = { __my_id, __my_depth };
 """
     # Insertar __SEB_ENTER justo después de la primera llave de funcion_target
     patron = rf"(\b{funcion_target}\s*\([^)]*\)\s*\{{)"
-    codigo_mod = re.sub(patron, rf"\1\n    __SEB_ENTER(\"{funcion_target}\");", codigo_original, count=1)
+    codigo_mod = re.sub(patron, rf'\1\n    __SEB_ENTER("{funcion_target}");', codigo_original, count=1)
     return header + "\n" + codigo_mod
 
 
-def _parsear_trazas_instrumentadas(output: str, nombre_fn: str) -> Tuple[Optional[NodoLlamada], int, int]:
+def _parsear_trazas_instrumentadas(
+    output: str, nombre_fn: str, frame_bytes: int = 32
+) -> Tuple[Optional[NodoLlamada], int, int]:
     """Reconstruye el árbol de llamadas recursivas a partir del log [SEB:ENTER:id:depth]."""
     lineas = [l.strip() for l in output.splitlines() if l.startswith("[SEB:")]
     if not lineas:
@@ -268,7 +295,7 @@ def _parsear_trazas_instrumentadas(output: str, nombre_fn: str) -> Tuple[Optiona
                 funcion=nombre_fn,
                 argumentos=f"call_{call_id}",
                 profundidad=depth,
-                stack_bytes=depth * 32,
+                stack_bytes=depth * frame_bytes,
             )
             if not raiz:
                 raiz = nodo

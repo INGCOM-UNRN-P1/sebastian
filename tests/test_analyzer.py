@@ -78,6 +78,27 @@ def test_trazado_dinamico_con_mermaid(tmp_path):
     diag = trazar_recursion_dinamica(fuente, "fact")
     assert diag.es_recursiva is True
     assert diag.arbol is not None
+    assert diag.profundidad_maxima == 3
+    assert diag.total_llamadas == 3
     mermaid = generar_mermaid_diagram(diag.arbol)
     assert "graph TD" in mermaid
     assert "node" in mermaid
+
+
+def test_trazado_dinamico_fibonacci_arbol(tmp_path):
+    fuente = tmp_path / "fib.c"
+    fuente.write_text("""
+    #include <stdio.h>
+    int fib(int n) {
+        if (n <= 1) return n;
+        return fib(n - 1) + fib(n - 2);
+    }
+    int main(void) {
+        printf("%d\\n", fib(4));
+        return 0;
+    }
+    """)
+    diag = trazar_recursion_dinamica(fuente, "fib")
+    assert diag.es_recursiva is True
+    assert diag.profundidad_maxima == 4
+    assert diag.total_llamadas == 9
