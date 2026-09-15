@@ -47,3 +47,15 @@ def test_cli_trace_json(tmp_path):
     assert data["es_recursiva"] is True
     assert data["funcion"] == "fact"
     assert data["profundidad_maxima"] >= 1
+
+
+def test_cli_doctor():
+    res = runner.invoke(app, ["doctor"])
+    assert res.exit_code == 0
+    assert "doctor" in res.stdout.lower()
+
+    res_json = runner.invoke(app, ["doctor", "--json"])
+    assert res_json.exit_code == 0
+    data = json.loads(res_json.stdout)
+    assert data["herramienta"] == "sebastian"
+    assert data["ok"] is True
