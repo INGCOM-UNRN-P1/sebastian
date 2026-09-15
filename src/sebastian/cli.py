@@ -106,7 +106,10 @@ def trace_cmd(
 
 def generar_seccion_markdown(reportes: list) -> str:
     """Genera sección de análisis de recursión y stack frames para Dredd."""
-    lines = ["## Análisis de Recursión y Consumo de Pila (Sebastian)\n"]
+    lines = [
+        "<!-- dredd-section: sebastian v1.0.0 -->\n",
+        "## Análisis de Recursión y Consumo de Pila (Sebastian)\n",
+    ]
     recursivas = [r for r in reportes if r.es_recursiva]
     lines.append(f"- **Funciones analizadas:** {len(reportes)}")
     lines.append(f"- **Funciones recursivas:** {len(recursivas)}\n")
@@ -117,7 +120,8 @@ def generar_seccion_markdown(reportes: list) -> str:
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
         for r in recursivas:
             cb_str = "✓ Sí" if r.tiene_caso_base else "❌ No"
-            lines.append(f"| `{r.funcion}()` | {r.linea_inicio} | {r.tipo_recursion} | {cb_str} | ~{r.consumo_stack_por_frame_bytes} B | **{r.riesgo_overflow}** |")
+            fn_limpia = r.funcion.replace("|", "&#124;")
+            lines.append(f"| `{fn_limpia}()` | {r.linea_inicio} | {r.tipo_recursion} | {cb_str} | ~{r.consumo_stack_por_frame_bytes} B | **{r.riesgo_overflow}** |")
         lines.append("")
     return "\n".join(lines)
 

@@ -49,6 +49,7 @@ class DiagnosticoRecursion:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": "1.0.0",
             "funcion": self.funcion,
             "archivo": str(self.archivo),
             "es_recursiva": self.es_recursiva,
