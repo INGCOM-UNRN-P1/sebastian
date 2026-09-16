@@ -138,6 +138,20 @@ def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[bool]:
                 return res.exito
             except ImportError:
                 return None
+def _try_import_nostromo():
+    try:
+        from nostromo.core.sandbox import ejecutar_aislado
+        return ejecutar_aislado
+    except ImportError:
+        import sys
+        sibling = Path(__file__).resolve().parents[4] / "nostromo" / "src"
+        if sibling.is_dir() and str(sibling) not in sys.path:
+            sys.path.insert(0, str(sibling))
+            try:
+                from nostromo.core.sandbox import ejecutar_aislado
+                return ejecutar_aislado
+            except ImportError:
+                return None
         return None
 
 
@@ -208,7 +222,18 @@ def trazar_recursion_dinamica(
                 comp_ok = (res_comp.returncode == 0)
 
         if comp_ok:
-                try:
+            try:
+                nostromo_fn = _try_import_nostromo()
+                if nostromo_fn:
+                    res_aislado = nostromo_fn(
+                        binario,
+                        args=args_programa,
+                        stdin_texto=stdin_data,
+                        timeout_segundos=3.0,
+                        memoria_mb=64,
+                    )
+                    stdout_str = res_aislado.stdout
+                else:
                     res_run = subprocess.run(
                         [str(binario)] + (args_programa or []),
                         input=stdin_data,
@@ -216,17 +241,19 @@ def trazar_recursion_dinamica(
                         text=True,
                         timeout=3,
                     )
-                    arbol, max_depth, total_calls = _parsear_trazas_instrumentadas(
-                        res_run.stdout, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
-                    )
-                    if arbol:
-                        diag_estatico.arbol = arbol
-                        diag_estatico.profundidad_maxima = max_depth
-                        diag_estatico.total_llamadas = total_calls
-                        diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
-                        return diag_estatico
-                except Exception:
-                    pass
+                    stdout_str = res_run.stdout
+
+                arbol, max_depth, total_calls = _parsear_trazas_instrumentadas(
+                    stdout_str, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
+                )
+                if arbol:
+                    diag_estatico.arbol = arbol
+                    diag_estatico.profundidad_maxima = max_depth
+                    diag_estatico.total_llamadas = total_calls
+                    diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
+                    return diag_estatico
+            except Exception:
+                pass
 
     # Fallback si falló la instrumentación dinámica: generar árbol sintético
     arbol_sintetico = NodoLlamada(
