@@ -122,6 +122,25 @@ def analizar_estatico_funcion(
     )
 
 
+def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[bool]:
+    try:
+        from daedalus.core.compiler import compilar_archivos
+        res = compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
+        return res.exito
+    except ImportError:
+        import sys
+        sibling = Path(__file__).resolve().parents[4] / "daedalus" / "src"
+        if sibling.is_dir() and str(sibling) not in sys.path:
+            sys.path.insert(0, str(sibling))
+            try:
+                from daedalus.core.compiler import compilar_archivos
+                res = compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
+                return res.exito
+            except ImportError:
+                return None
+        return None
+
+
 def trazar_recursion_dinamica(
     archivo_c: Path,
     funcion_target: str,
@@ -174,15 +193,21 @@ def trazar_recursion_dinamica(
         fuente_inst = tmp_path / "instrumentado.c"
         fuente_inst.write_text(codigo_instrumentado, encoding="utf-8")
 
-        gcc = shutil.which("gcc")
-        if gcc:
-            res_comp = subprocess.run(
-                [gcc, "-g", "-O0", "-std=c11", str(fuente_inst), "-o", str(binario), "-lm"],
-                capture_output=True,
-                text=True,
-            )
+        daed_ok = _compilar_con_daedalus(fuente_inst, binario)
+        comp_ok = False
+        if daed_ok is not None:
+            comp_ok = daed_ok
+        else:
+            gcc = shutil.which("gcc")
+            if gcc:
+                res_comp = subprocess.run(
+                    [gcc, "-g", "-O0", "-std=c11", str(fuente_inst), "-o", str(binario), "-lm"],
+                    capture_output=True,
+                    text=True,
+                )
+                comp_ok = (res_comp.returncode == 0)
 
-            if res_comp.returncode == 0:
+        if comp_ok:
                 try:
                     res_run = subprocess.run(
                         [str(binario)] + (args_programa or []),
