@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from sebastian.core.masking import enmascarar_comentarios_y_literales
 from sebastian.core.models import DiagnosticoRecursion, NodoLlamada
 
 
@@ -55,9 +56,12 @@ def analizar_estatico_funcion(
     linea_inicio: int = 1,
 ) -> DiagnosticoRecursion:
     """Realiza un análisis estático de una función para detectar patrones recursivos."""
-    # Buscar llamadas recursivas al propio nombre
+    # Los comentarios y literales se blanquean antes de buscar: sin esto, el
+    # nombre de la función mencionado en un comentario o en un printf cuenta
+    # como llamada recursiva y la función se reporta como recursiva sin serlo.
+    cuerpo_analizable = enmascarar_comentarios_y_literales(cuerpo)
     patron_llamada = re.compile(rf"\b{nombre_fn}\s*\(")
-    llamadas = list(patron_llamada.finditer(cuerpo[cuerpo.find('{'):]))
+    llamadas = list(patron_llamada.finditer(cuerpo_analizable[cuerpo_analizable.find('{'):]))
 
     es_recursiva = len(llamadas) > 0
     if not es_recursiva:
@@ -71,13 +75,13 @@ def analizar_estatico_funcion(
         )
 
     # Detectar caso base (presencia de if con return antes de la llamada recursiva)
-    tiene_caso_base = bool(re.search(r"if\s*\([^)]+\)\s*\{?[^}]*return", cuerpo))
+    tiene_caso_base = bool(re.search(r"if\s*\([^)]+\)\s*\{?[^}]*return", cuerpo_analizable))
 
     # Detectar tipo de recursión
     total_calls = len(llamadas)
     # Recursión de cola (tail call): 'return fn(...);' sin operadores adicionales
     re_tail = re.compile(rf"return\s+{nombre_fn}\s*\([^;]+\);")
-    es_tail = bool(re_tail.search(cuerpo))
+    es_tail = bool(re_tail.search(cuerpo_analizable))
 
     if total_calls > 1:
         tipo = "arbol"
@@ -198,6 +202,8 @@ def trazar_recursion_dinamica(
 
     # Construir un árbol sintético representativo si no se puede ejecutar dinámicamente
     # o ejecutar la instrumentación
+    motivo_fallo: Optional[str] = None
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         binario = tmp_path / "prog_instrumentado"
@@ -220,6 +226,9 @@ def trazar_recursion_dinamica(
                     text=True,
                 )
                 comp_ok = (res_comp.returncode == 0)
+
+        if not comp_ok:
+            motivo_fallo = "No se pudo compilar la versión instrumentada de la función."
 
         if comp_ok:
             try:
@@ -247,37 +256,26 @@ def trazar_recursion_dinamica(
                     stdout_str, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
                 )
                 if arbol:
+                    diag_estatico.origen_medicion = "dinamica"
                     diag_estatico.arbol = arbol
                     diag_estatico.profundidad_maxima = max_depth
                     diag_estatico.total_llamadas = total_calls
                     diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
                     return diag_estatico
-            except Exception:
-                pass
+                motivo_fallo = "La ejecución instrumentada no produjo trazas de llamadas."
+            except Exception as exc:
+                motivo_fallo = f"Falló la ejecución instrumentada: {exc}"
 
-    # Fallback si falló la instrumentación dinámica: generar árbol sintético
-    arbol_sintetico = NodoLlamada(
-        id=1,
-        funcion=nombre_fn,
-        argumentos="...",
-        profundidad=1,
-        retorno="✓",
-        stack_bytes=diag_estatico.consumo_stack_por_frame_bytes,
-        hijos=[
-            NodoLlamada(
-                id=2,
-                funcion=nombre_fn,
-                argumentos="base",
-                profundidad=2,
-                retorno="1",
-                stack_bytes=2 * diag_estatico.consumo_stack_por_frame_bytes,
-            )
-        ],
-    )
-    diag_estatico.arbol = arbol_sintetico
-    diag_estatico.profundidad_maxima = 2
-    diag_estatico.total_llamadas = 2
-    diag_estatico.consumo_pico_stack_bytes = 2 * diag_estatico.consumo_stack_por_frame_bytes
+    # Si la instrumentación dinámica no se pudo completar, se informa el análisis
+    # estático tal cual, sin inventar un árbol de dos niveles: una profundidad
+    # fabricada es indistinguible de una medida y sirve para tomar decisiones
+    # equivocadas sobre el riesgo de desborde de pila.
+    diag_estatico.origen_medicion = "estatica"
+    diag_estatico.motivo_sin_medicion = motivo_fallo or "No se pudo instrumentar y ejecutar la función."
+    diag_estatico.arbol = None
+    diag_estatico.profundidad_maxima = 0
+    diag_estatico.total_llamadas = 0
+    diag_estatico.consumo_pico_stack_bytes = 0
     return diag_estatico
 
 

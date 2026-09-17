@@ -46,6 +46,12 @@ class DiagnosticoRecursion:
     riesgo_overflow: str = "BAJO"  # "BAJO", "MEDIO", "ALTO"
     arbol: Optional[NodoLlamada] = None
     recomendaciones: List[str] = field(default_factory=list)
+    # "dinamica" cuando el árbol, la profundidad y el consumo salen de ejecutar
+    # el programa instrumentado; "estatica" cuando solo se pudo inspeccionar el
+    # fuente. Sin esta distinción, una medición fallida se veía igual que una
+    # real.
+    origen_medicion: str = "estatica"
+    motivo_sin_medicion: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -56,6 +62,8 @@ class DiagnosticoRecursion:
             "tipo_recursion": self.tipo_recursion,
             "tiene_caso_base": self.tiene_caso_base,
             "linea_inicio": self.linea_inicio,
+            "origen_medicion": self.origen_medicion,
+            "motivo_sin_medicion": self.motivo_sin_medicion,
             "total_llamadas": self.total_llamadas,
             "profundidad_maxima": self.profundidad_maxima,
             "consumo_stack_por_frame_bytes": self.consumo_stack_por_frame_bytes,
