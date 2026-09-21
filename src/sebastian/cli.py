@@ -132,8 +132,13 @@ def analyze_cmd(
     fuente: Path = typer.Argument(..., help="Archivo C a analizar estáticamente."),
     json_output: bool = typer.Option(False, "--json", help="Emitir reporte en JSON."),
     output_md: Optional[Path] = typer.Option(None, "--md", "--output-md", "-o", help="Generar sección de reporte en formato Markdown para fusión en Dredd."),
+    fail_on_high_risk: bool = typer.Option(False, "--fail-on-high-risk", help="Salir con código 1 si alguna función tiene riesgo de overflow ALTO (por defecto siempre 0)."),
 ) -> None:
-    """Analiza estáticamente todas las funciones del archivo en busca de recursión y riesgos de desbordamiento."""
+    """Analiza estáticamente todas las funciones del archivo en busca de recursión y riesgos de desbordamiento.
+
+    Códigos de salida: 0 análisis correcto, 2 archivo inexistente y, solo con
+    --fail-on-high-risk, 1 si hay riesgo ALTO.
+    """
     if not fuente.is_file():
         err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
         raise typer.Exit(code=2)
@@ -146,16 +151,18 @@ def analyze_cmd(
         diag = analizar_estatico_funcion(fn_name, cuerpo, fuente, l_start)
         reportes.append(diag)
 
+    codigo = 1 if fail_on_high_risk and any(r.es_recursiva and r.riesgo_overflow == "ALTO" for r in reportes) else 0
+
     if output_md:
         md_text = generar_seccion_markdown(reportes)
         output_md.parent.mkdir(parents=True, exist_ok=True)
         output_md.write_text(md_text, encoding="utf-8")
         console.print(f"[green]✓ Sección Markdown generada en:[/green] [cyan]{output_md}[/cyan]")
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=codigo)
 
     if json_output:
         print(json.dumps([r.to_dict() for r in reportes], indent=2, ensure_ascii=False))
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=codigo)
 
     tabla = Table(title=f"Análisis de Recursión en {fuente.name} ({len(reportes)} funciones)")
     tabla.add_column("Función", style="cyan")
@@ -191,6 +198,8 @@ def analyze_cmd(
 
     console.print(tabla)
     console.print(f"[dim]Total funciones: {len(reportes)} · Recursivas detectadas: {recursivas_count}[/dim]")
+    if codigo:
+        raise typer.Exit(code=codigo)
 
 
 @app.command("report")
