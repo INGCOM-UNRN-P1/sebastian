@@ -90,7 +90,8 @@ def analizar_estatico_funcion(
     else:
         tipo = "lineal"
 
-    # Estimar tamaño de stack frame (16 bytes base + variables aproximadas)
+    # Estimar tamaño de stack frame: 32 bytes base (dirección de retorno, rbp
+    # guardado y alineación a 16) más un extra fijo si hay double/long o arreglos.
     frame_bytes = 32
     if "double" in cuerpo or "long" in cuerpo:
         frame_bytes += 32
