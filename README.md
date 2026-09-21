@@ -7,9 +7,9 @@ SEBASTIAN es una herramienta pedagógica diseñada para analizar algoritmos recu
 ## 🎯 Alcance
 
 ### Qué cubre
-- Análisis estático y dinámico de algoritmos recursivos en programas C.
-- Cálculo de la profundidad máxima de llamadas recursivas alcanzadas.
-- Estimación del tamaño del marco de pila (Stack Frame Size) por llamada y consumo acumulado en memoria.
+- Análisis **estático** (`analyze`/`check`, sin ejecutar nada) de algoritmos recursivos en programas C: tipo de recursión, caso base y riesgo de overflow.
+- Trazado **dinámico** (`trace`): compila con instrumentación (vía `daedalus`) y ejecuta en el sandbox de `nostromo` para medir la profundidad máxima realmente alcanzada; requiere `gcc`. Si la medición falla, el resultado vuelve al análisis estático y el campo `origen_medicion` lo declara (`dinamica` o `estatica`).
+- Tamaño del marco de pila (Stack Frame Size): es una **estimación heurística** (32 bytes base, +32 con `double`/`long`, +64 con arreglos), no una medición; el consumo pico = profundidad × bytes por frame.
 - Detección temprana de riesgos de desbordamiento de pila (Stack Overflow) y ramas recursivas infinitas.
 - Visualización del árbol de llamadas recursivas en consola terminal y en diagramas Mermaid.
 
