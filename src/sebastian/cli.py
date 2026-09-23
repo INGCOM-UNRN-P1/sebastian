@@ -106,11 +106,12 @@ def trace_cmd(
 
 def generar_seccion_markdown(reportes: list) -> str:
     """Genera sección de análisis de recursión y stack frames para Dredd."""
+    recursivas = [r for r in reportes if r.es_recursiva]
+    status = "fail" if any(not r.tiene_caso_base or r.riesgo_overflow == "ALTO" for r in recursivas) else "ok"
     lines = [
-        "<!-- dredd-section: sebastian v1.0.0 -->\n",
+        f"<!-- dredd-section: sebastian, tool=sebastian, version=1.0.0, status={status} -->\n",
         "## Análisis de Recursión y Consumo de Pila (Sebastian)\n",
     ]
-    recursivas = [r for r in reportes if r.es_recursiva]
     lines.append(f"- **Funciones analizadas:** {len(reportes)}")
     lines.append(f"- **Funciones recursivas:** {len(recursivas)}\n")
     if not recursivas:
