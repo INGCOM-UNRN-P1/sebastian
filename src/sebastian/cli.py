@@ -23,6 +23,7 @@ console = Console()
 err_console = Console(stderr=True)
 
 app = typer.Typer(
+    context_settings={"help_option_names": ["-h", "--help"]},
     name="sebastian",
     help="🌀 SEBASTIAN — Analizador de llamadas recursivas, consumo de stack frame y riesgos de stack overflow en C.",
     add_completion=True,
