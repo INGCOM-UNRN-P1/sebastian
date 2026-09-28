@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict
 
+from sebastian import __version__
 from sebastian.core.analyzer import analizar_estatico_funcion, extraer_funciones_c
 
 
@@ -12,7 +13,7 @@ class SebastianPlugin:
     """Expone el análisis de recursión de SEBASTIAN como observaciones JSON."""
 
     name = "sebastian"
-    version = "0.1.0"
+    version = __version__
 
     def is_available(self) -> bool:
         return True
