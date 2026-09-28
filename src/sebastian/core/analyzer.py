@@ -130,34 +130,18 @@ def analizar_estatico_funcion(
 def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[bool]:
     try:
         from daedalus.core.compiler import compilar_archivos
-        res = compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
-        return res.exito
     except ImportError:
-        import sys
-        sibling = Path(__file__).resolve().parents[4] / "daedalus" / "src"
-        if sibling.is_dir() and str(sibling) not in sys.path:
-            sys.path.insert(0, str(sibling))
-            try:
-                from daedalus.core.compiler import compilar_archivos
-                res = compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
-                return res.exito
-            except ImportError:
-                return None
+        return None  # sin el extra `ecosistema` se usa el camino propio
+    res = compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
+    return res.exito
+
+
 def _try_import_nostromo():
     try:
         from nostromo.core.sandbox import ejecutar_aislado
-        return ejecutar_aislado
     except ImportError:
-        import sys
-        sibling = Path(__file__).resolve().parents[4] / "nostromo" / "src"
-        if sibling.is_dir() and str(sibling) not in sys.path:
-            sys.path.insert(0, str(sibling))
-            try:
-                from nostromo.core.sandbox import ejecutar_aislado
-                return ejecutar_aislado
-            except ImportError:
-                return None
-        return None
+        return None  # sin el extra `ecosistema` se usa el camino propio
+    return ejecutar_aislado
 
 
 def trazar_recursion_dinamica(
