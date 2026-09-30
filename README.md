@@ -50,3 +50,32 @@ sebastian analyze algoritmo.c
 # 4. Salida estructurada JSON para pipelines CI
 sebastian trace factorial.c --json
 ```
+
+<!-- p1:referencia:inicio — generado por p1-tools/scripts/readme_generado.py: no editar a mano -->
+
+## Referencia rápida
+
+### Requisitos
+
+- Python ≥ 3.11 y [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- Programas del sistema: `gcc`.
+
+| Sistema | `gcc` |
+|:--|:--|
+| Debian / Ubuntu | `sudo apt install gcc` |
+| Fedora | `sudo dnf install gcc` |
+| Windows | incluido en el entorno de la cátedra (MSYS2 UCRT64) |
+| macOS | `xcode-select --install` (clang como `gcc`) |
+
+### Comandos
+
+| Comando | Descripción |
+|:--|:--|
+| `sebastian trace` | Ejecuta el código instrumentado, traza las llamadas recursivas y visualiza el árbol de ejecución. |
+| `sebastian check`, `sebastian analyze` | Analiza estáticamente todas las funciones del archivo en busca de recursión y riesgos de desbordamiento. |
+| `sebastian report` | Genera directamente la sección de reporte Markdown de SEBASTIAN para Dredd. |
+| `sebastian doctor` | Verifica el estado del entorno de análisis de recursión y stack SEBASTIAN (Python, GCC). |
+
+Ayuda de cada comando: `sebastian <comando> -h`.
+
+<!-- p1:referencia:fin -->
