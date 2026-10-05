@@ -52,6 +52,10 @@ class DiagnosticoRecursion:
     # real.
     origen_medicion: str = "estatica"
     motivo_sin_medicion: Optional[str] = None
+    # QoL #870: cuántas llamadas anidadas entran en la pila (límite / bytes por marco).
+    limite_stack_bytes: int = 0
+    profundidad_maxima_estimada: int = 0
+    marco_medido_por_gcc: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +73,9 @@ class DiagnosticoRecursion:
             "consumo_stack_por_frame_bytes": self.consumo_stack_por_frame_bytes,
             "consumo_pico_stack_bytes": self.consumo_pico_stack_bytes,
             "riesgo_overflow": self.riesgo_overflow,
+            "limite_stack_bytes": self.limite_stack_bytes,
+            "profundidad_maxima_estimada": self.profundidad_maxima_estimada,
+            "marco_medido_por_gcc": self.marco_medido_por_gcc,
             "arbol": self.arbol.to_dict() if self.arbol else None,
             "recomendaciones": self.recomendaciones,
         }

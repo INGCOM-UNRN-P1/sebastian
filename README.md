@@ -51,6 +51,14 @@ sebastian analyze algoritmo.c
 sebastian trace factorial.c --json
 ```
 
+### Cuántas llamadas entran en la pila
+
+De cada función recursiva se informa la profundidad máxima antes del Stack Overflow
+(`profundidad_maxima_estimada`): el límite de la pila del proceso (`ulimit -s`, 8 MiB por defecto en
+Linux; 1 MiB en Windows) dividido por los bytes de cada llamada, que se miden con
+`gcc -fstack-usage` (`marco_medido_por_gcc`) o, si no compila, se estiman por el código. Con
+`sebastian trace` se agrega cuánto de ese máximo usó la ejecución; pasar del 50 % es riesgo alto.
+
 <!-- p1:referencia:inicio — generado por p1-tools/scripts/readme_generado.py: no editar a mano -->
 
 ## Referencia rápida

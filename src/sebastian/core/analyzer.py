@@ -114,7 +114,7 @@ def analizar_estatico_funcion(
     elif es_recursiva and tipo == "lineal":
         recomendaciones.append("La función realiza operaciones tras la llamada recursiva (ej: n * f(n-1)). Transformarla a recursión de cola con un acumulador optimizará la pila.")
 
-    return DiagnosticoRecursion(
+    diag = DiagnosticoRecursion(
         funcion=nombre_fn,
         archivo=archivo,
         es_recursiva=True,
@@ -125,6 +125,32 @@ def analizar_estatico_funcion(
         riesgo_overflow=riesgo,
         recomendaciones=recomendaciones,
     )
+    completar_limite_de_pila(diag)
+    return diag
+
+
+def completar_limite_de_pila(diag: DiagnosticoRecursion) -> None:
+    """Cuántas llamadas anidadas entran en la pila antes del Stack Overflow (QoL #870)."""
+    from sebastian.core.pila import limite_de_pila, marco_compilado, profundidad_maxima
+
+    marco = marco_compilado(Path(diag.archivo), diag.funcion)
+    if marco:
+        diag.consumo_stack_por_frame_bytes = marco
+        diag.marco_medido_por_gcc = True
+    limite, origen = limite_de_pila()
+    diag.limite_stack_bytes = limite
+    diag.profundidad_maxima_estimada = profundidad_maxima(diag.consumo_stack_por_frame_bytes, limite)
+    fuente_marco = "según gcc -fstack-usage" if diag.marco_medido_por_gcc else "estimados por el código"
+    texto = (f"Con {diag.consumo_stack_por_frame_bytes} bytes por llamada ({fuente_marco}) y una pila de "
+             f"{limite / 1048576:g} MiB ({origen}), '{diag.funcion}' admite unas "
+             f"{diag.profundidad_maxima_estimada:,} llamadas anidadas antes del Stack Overflow.")
+    diag.recomendaciones = [r for r in diag.recomendaciones if not r.startswith("Con ") or "llamadas anidadas" not in r]
+    if diag.profundidad_maxima:
+        uso = 100.0 * diag.profundidad_maxima / max(1, diag.profundidad_maxima_estimada)
+        texto += f" Esta ejecución llegó a {diag.profundidad_maxima:,} ({uso:.2g} % del máximo)."
+        if uso >= 50 and diag.riesgo_overflow != "ALTO":
+            diag.riesgo_overflow = "ALTO"
+    diag.recomendaciones.append(texto)
 
 
 def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[bool]:
@@ -246,6 +272,7 @@ def trazar_recursion_dinamica(
                     diag_estatico.profundidad_maxima = max_depth
                     diag_estatico.total_llamadas = total_calls
                     diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
+                    completar_limite_de_pila(diag_estatico)
                     return diag_estatico
                 motivo_fallo = "La ejecución instrumentada no produjo trazas de llamadas."
             except Exception as exc:
