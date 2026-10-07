@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from sebastian import __version__
 from sebastian.core.analyzer import analizar_estatico_funcion, extraer_funciones_c
@@ -20,7 +20,7 @@ class SebastianPlugin:
 
     def execute(self, workspace: Path, manifest_config: Dict[str, Any]) -> Dict[str, Any]:
         observaciones = []
-        reportes = []
+        reportes: List[Dict[str, Any]] = []
         for archivo in sorted(Path(workspace).rglob("*.c")):
             contenido = archivo.read_text(encoding="utf-8")
             diagnosticos = [
