@@ -28,4 +28,4 @@ def test_marco_de_gcc_y_recomendacion(tmp_path: Path):
     (nombre, cuerpo, linea, _), = extraer_funciones_c(FUENTE)
     diag = analizar_estatico_funcion(nombre, cuerpo, f, linea)
     assert diag.marco_medido_por_gcc and diag.profundidad_maxima_estimada == diag.limite_stack_bytes // diag.consumo_stack_por_frame_bytes
-    assert "llamadas anidadas antes del Stack Overflow" in diag.recomendaciones[-1]
+    assert "llamadas anidadas antes del desborde de pila" in diag.recomendaciones[-1]

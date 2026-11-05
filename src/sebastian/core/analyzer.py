@@ -103,14 +103,14 @@ def analizar_estatico_funcion(
 
     if not tiene_caso_base:
         riesgo = "ALTO"
-        recomendaciones.append("No se detectó un caso base claro ('if (...) return'). Esto provocará Stack Overflow.")
+        recomendaciones.append("No se detectó un caso base claro ('if (...) return'). Esto provocará un desborde de pila (Stack Overflow).")
 
     if tipo == "arbol":
         riesgo = "MEDIO" if tiene_caso_base else "ALTO"
         recomendaciones.append("La recursión en árbol tiene complejidad exponencial $O(2^n)$. Considerá memoización o programación dinámica.")
 
     if tipo == "cola":
-        recomendaciones.append("La función utiliza recursión de cola (Tail Recursion). Compiladores con -O2 la optimizarán a un bucle iterativo sin consumo de Stack.")
+        recomendaciones.append("La función utiliza recursión de cola (Tail Recursion). Compiladores con -O2 la optimizarán a un lazo iterativo sin consumo de Stack.")
     elif es_recursiva and tipo == "lineal":
         recomendaciones.append("La función realiza operaciones tras la llamada recursiva (ej: n * f(n-1)). Transformarla a recursión de cola con un acumulador optimizará la pila.")
 
@@ -143,7 +143,7 @@ def completar_limite_de_pila(diag: DiagnosticoRecursion) -> None:
     fuente_marco = "según gcc -fstack-usage" if diag.marco_medido_por_gcc else "estimados por el código"
     texto = (f"Con {diag.consumo_stack_por_frame_bytes} bytes por llamada ({fuente_marco}) y una pila de "
              f"{limite / 1048576:g} MiB ({origen}), '{diag.funcion}' admite unas "
-             f"{diag.profundidad_maxima_estimada:,} llamadas anidadas antes del Stack Overflow.")
+             f"{diag.profundidad_maxima_estimada:,} llamadas anidadas antes del desborde de pila.")
     diag.recomendaciones = [r for r in diag.recomendaciones if not r.startswith("Con ") or "llamadas anidadas" not in r]
     if diag.profundidad_maxima:
         uso = 100.0 * diag.profundidad_maxima / max(1, diag.profundidad_maxima_estimada)

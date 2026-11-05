@@ -28,7 +28,7 @@ err_console = Console(stderr=True)
 app = crear_app(
     "sebastian",
     __version__,
-    "🌀 SEBASTIAN — Analizador de llamadas recursivas, consumo de stack frame y riesgos de stack overflow en C.",
+    "🌀 SEBASTIAN — Analizador de llamadas recursivas, consumo de stack frame y riesgos de desborde de pila en C.",
     add_completion=True,
 )
 
@@ -72,7 +72,7 @@ def trace_cmd(
         f"• Total de llamadas registradas: [bold]{diag.total_llamadas}[/bold]\n"
         f"• Profundidad máxima alcanzada: [bold]{diag.profundidad_maxima}[/bold] frames\n"
         f"• Consumo de Stack estimado: ~[bold]{diag.consumo_stack_por_frame_bytes} bytes/frame[/bold] (Pico: ~[bold]{diag.consumo_pico_stack_bytes} B[/bold])\n"
-        f"• Riesgo de Stack Overflow: [{color_riesgo}][bold]{diag.riesgo_overflow}[/bold][/{color_riesgo}]"
+        f"• Riesgo de desborde de pila: [{color_riesgo}][bold]{diag.riesgo_overflow}[/bold][/{color_riesgo}]"
     )
     console.print(Panel(info_text, title=f"📊 Análisis de Recursión: {diag.funcion}()", border_style="cyan"))
 
