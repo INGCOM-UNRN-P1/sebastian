@@ -171,6 +171,7 @@ Genera directamente la sección de reporte Markdown de SEBASTIAN para Dredd.
 | Opción / Banderas | Tipo | Por Defecto | Descripción |
 | :--- | :--- | :--- | :--- |
 | `--output`, `-o` | `Optional[Path]` | `None` | Ruta de destino del archivo Markdown. |
+| `--include`, `-I` | `Optional[List[Path]]` | `None` | Carpeta de headers (se puede repetir). El `include/` del proyecto se detecta solo. |
 
 #### Ejemplo de Invocación
 ```bash
