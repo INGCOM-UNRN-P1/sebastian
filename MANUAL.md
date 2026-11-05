@@ -196,7 +196,7 @@ Este encabezado garantiza la agregación determinista de los hallazgos en la rú
 | Código | Significado |
 | :---: | :--- |
 | `0` | Ejecución exitosa sin hallazgos críticos ni errores de sintaxis. |
-| `1` | Hallazgos pedagógicos detectados, infracción de reglas o advertencias activas. |
+| `1` | Hallazgos pedagógicos detectados, infracción de reglas o advertencias activas. En `trace`, no se pudo obtener la traza: el código no compila, no tiene `main`, la función no se llamó o el programa no terminó; el motivo se muestra en pantalla y en `causa_sin_medicion` del JSON. |
 | `2` | Error de sintaxis en argumentos CLI o archivo fuente no encontrado. |
 | `>2` | Error no recuperable del sistema, fallo de memoria o excepción interna. |
 
