@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from sebastian import __version__
-from sebastian.core.analyzer import analizar_estatico_funcion, extraer_funciones_c
+from sebastian.core.analyzer import analizar_archivo, errores_de_compilacion
 
 
 class SebastianPlugin:
@@ -21,12 +21,21 @@ class SebastianPlugin:
     def execute(self, workspace: Path, manifest_config: Dict[str, Any]) -> Dict[str, Any]:
         observaciones = []
         reportes: List[Dict[str, Any]] = []
+        includes = sorted({header.parent for header in Path(workspace).rglob("*.h")})
         for archivo in sorted(Path(workspace).rglob("*.c")):
             contenido = archivo.read_text(encoding="utf-8")
-            diagnosticos = [
-                analizar_estatico_funcion(nombre, cuerpo, archivo, linea)
-                for nombre, cuerpo, linea, _ in extraer_funciones_c(contenido)
-            ]
+            errores = errores_de_compilacion(archivo, includes)
+            if errores:
+                observaciones.append({
+                    "rule_code": "SEBASTIAN002",
+                    "severity": "warning",
+                    "file": str(archivo),
+                    "line": 1,
+                    "message": f"{archivo.name} no compila: el análisis de recursión puede no ser confiable.",
+                    "suggestion": " ".join(errores),
+                    "source_plugin": self.name,
+                })
+            diagnosticos = analizar_archivo(contenido, archivo, includes)
             reportes.extend(diagnostico.to_dict() for diagnostico in diagnosticos)
             for diagnostico in diagnosticos:
                 if not diagnostico.es_recursiva:

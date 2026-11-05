@@ -101,3 +101,125 @@ def test_sin_gcc_dice_que_falta(tmp_path, monkeypatch):
     monkeypatch.setattr(analyzer, "_compilar_con_daedalus", lambda *_: None)
     diag = trazar_recursion_dinamica(_fuente(tmp_path, RECURSIVA + MAIN), "f")
     assert diag.causa_sin_medicion == "sin_compilador" and "gcc" in diag.motivo_sin_medicion
+
+
+def _proyecto(tmp_path):
+    """src/ + include/, con main en otro archivo: la forma de la actividad de ejemplo del corpus."""
+    (tmp_path / "include").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "include" / "cuenta.h").write_text("int cuenta(int n);\n", encoding="utf-8")
+    fuente = _fuente(tmp_path / "src", '#include "cuenta.h"\nint cuenta(int n)\n{\n    return n ? 1 + cuenta(n - 1) : 0;\n}\n',
+                     "cuenta.c")
+    principal = _fuente(tmp_path / "src", '#include "cuenta.h"\nint main(void)\n{\n    return cuenta(3);\n}\n', "main.c")
+    return fuente, principal
+
+
+def test_un_header_en_include_no_se_informa_como_error_de_compilacion(tmp_path):
+    fuente, _ = _proyecto(tmp_path)
+    assert analyzer.errores_de_compilacion(fuente) == []
+    diag = trazar_recursion_dinamica(fuente, "")
+    assert diag.causa_sin_medicion == "sin_main"
+
+
+def test_sin_main_propone_el_archivo_que_lo_tiene(tmp_path):
+    fuente, principal = _proyecto(tmp_path)
+    assert f"--source {principal}" in trazar_recursion_dinamica(fuente, "").motivo_sin_medicion
+
+
+def test_traza_un_programa_de_varios_archivos(tmp_path):
+    fuente, principal = _proyecto(tmp_path)
+    res = runner.invoke(app, ["trace", str(fuente), "--source", str(principal), "--json"])
+    assert res.exit_code == 0 and json.loads(res.stdout)["total_llamadas"] == 4
+
+
+def test_include_explicito_para_una_carpeta_que_no_se_detecta(tmp_path):
+    (tmp_path / "cabeceras").mkdir()
+    (tmp_path / "cabeceras" / "v.h").write_text("#define V 3\n", encoding="utf-8")
+    fuente = _fuente(tmp_path, '#include "v.h"\n' + RECURSIVA + "int main(void)\n{\n    return f(V);\n}\n")
+    assert trazar_recursion_dinamica(fuente, "").causa_sin_medicion == "no_compila"
+    res = runner.invoke(app, ["trace", str(fuente), "-I", str(tmp_path / "cabeceras"), "--json"])
+    assert res.exit_code == 0 and json.loads(res.stdout)["total_llamadas"] == 4
+
+
+def test_source_inexistente_sale_con_2(tmp_path):
+    res = runner.invoke(app, ["trace", str(_fuente(tmp_path, RECURSIVA)), "--source", str(tmp_path / "no.c")])
+    assert res.exit_code == 2
+
+
+def test_falta_de_codigo_propone_el_archivo_vecino_que_lo_define(tmp_path):
+    fuente = _fuente(tmp_path, "int g(int n);\nint f(int n)\n{\n    return n ? g(n) + f(n - 1) : 0;\n}\n" + MAIN)
+    vecino = _fuente(tmp_path, "int g(int n)\n{\n    return n;\n}\n", "otro.c")
+    diag = trazar_recursion_dinamica(fuente, "")
+    assert diag.causa_sin_medicion == "no_enlaza" and f"--source {vecino}" in diag.motivo_sin_medicion
+
+
+def test_definicion_repetida_entre_archivos(tmp_path):
+    fuente = _fuente(tmp_path, RECURSIVA + MAIN)
+    otra = _fuente(tmp_path, "int main(void)\n{\n    return 0;\n}\n", "otro.c")
+    diag = trazar_recursion_dinamica(fuente, "", otras_fuentes=[otra])
+    assert diag.causa_sin_medicion == "no_enlaza" and "main" in diag.motivo_sin_medicion
+
+
+def test_un_error_en_otro_archivo_se_atribuye_a_ese_archivo(tmp_path):
+    fuente = _fuente(tmp_path, RECURSIVA)
+    otra = _fuente(tmp_path, "int main(void)\n{\n    return 0\n}\n", "otro.c")
+    diag = trazar_recursion_dinamica(fuente, "", otras_fuentes=[otra])
+    assert diag.causa_sin_medicion == "no_compila" and "otro.c no compila" in diag.motivo_sin_medicion
+
+
+@pytest.mark.parametrize("firma", [
+    "const char *salta(const char *s)",
+    "char* salta(const char *s)",
+    "static const char *\nsalta(const char *s)",
+])
+def test_una_funcion_que_devuelve_puntero_se_encuentra(tmp_path, firma):
+    fuente = _fuente(tmp_path, f"{firma}\n{{\n    return *s == ' ' ? salta(s + 1) : (char *)s;\n}}\n"
+                               'int main(void)\n{\n    return *salta(" a");\n}\n')
+    assert trazar_recursion_dinamica(fuente, "salta").total_llamadas == 2
+
+
+def test_un_parametro_puntero_a_funcion_no_esconde_la_funcion(tmp_path):
+    fuente = _fuente(tmp_path, "int ap(int (*g)(int), int n)\n{\n    return n ? ap(g, n - 1) : g(n);\n}\n"
+                               "int id(int n)\n{\n    return n;\n}\n"
+                               "int main(void)\n{\n    return ap(id, 2);\n}\n")
+    assert trazar_recursion_dinamica(fuente, "ap").total_llamadas == 3
+
+
+MUTUA = ("int impar(int n);\nint par(int n)\n{\n    if (n == 0) return 1;\n    return impar(n - 1);\n}\n"
+         "int impar(int n)\n{\n    return par(n - 1);\n}\nint main(void)\n{\n    return par(2);\n}\n")
+
+
+def test_la_recursion_mutua_se_traza_con_las_dos_funciones(tmp_path):
+    diag = trazar_recursion_dinamica(_fuente(tmp_path, MUTUA), "")
+    assert diag.funcion == "par" and diag.tipo_recursion == "mutua" and diag.tiene_caso_base
+    assert diag.total_llamadas == 3 and diag.arbol.hijos[0].funcion == "impar"
+
+
+def test_el_analisis_estatico_ve_la_recursion_mutua(tmp_path):
+    res = runner.invoke(app, ["check", str(_fuente(tmp_path, MUTUA)), "--json"])
+    por_nombre = {r["funcion"]: r for r in json.loads(res.stdout)}
+    assert por_nombre["impar"]["tipo_recursion"] == "mutua" and por_nombre["impar"]["tiene_caso_base"]
+    assert por_nombre["main"]["es_recursiva"] is False
+
+
+def test_sin_llamadas_cuenta_el_codigo_y_lo_que_escribio_el_programa(tmp_path):
+    fuente = _fuente(tmp_path, '#include <stdio.h>\n' + RECURSIVA +
+                     'int main(int c, char **v)\n{\n    if (c < 2) { fputs("uso: prog n\\n", stderr); return 1; }\n'
+                     "    return f(c);\n}\n")
+    motivo = trazar_recursion_dinamica(fuente, "").motivo_sin_medicion
+    assert "con código 1" in motivo and "uso: prog n" in motivo
+
+
+def test_report_avisa_que_no_compila(tmp_path):
+    fuente = _fuente(tmp_path, "int f(int n)\n{\n    return n\n}\n")
+    res = runner.invoke(app, ["report", str(fuente)])
+    assert "El código no compila" in res.stderr
+    assert "status=fail" in res.stdout and "no compila" in res.stdout
+
+
+def test_un_error_sin_traduccion_muestra_el_mensaje_del_compilador_una_vez(tmp_path):
+    fuente = tmp_path / "raro.c"
+    fuente.write_bytes(b"\xff\xfe int main(void) { return 0; }\n")
+    errores = analyzer.errores_de_compilacion(fuente)
+    assert errores and len(errores) == len(set(errores))
+    assert not any("Diagnóstico del compilador" in error for error in errores)

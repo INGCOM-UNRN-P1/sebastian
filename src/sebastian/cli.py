@@ -17,9 +17,8 @@ from sebastian import __version__
 from sebastian.core.analyzer import (
     NODOS_ARBOL,
     PROFUNDIDAD_ARBOL,
-    analizar_estatico_funcion,
+    analizar_archivo,
     errores_de_compilacion,
-    extraer_funciones_c,
     trazar_recursion_dinamica,
 )
 from sebastian.core.models import DiagnosticoRecursion
@@ -27,6 +26,7 @@ from sebastian.core.visualizer import construir_rich_tree, generar_mermaid_diagr
 
 console = Console()
 err_console = Console(stderr=True)
+AYUDA_INCLUDE = "Carpeta de headers (se puede repetir). El include/ del proyecto se detecta solo."
 
 # Contrato de línea de comandos del ecosistema (-h/--help, --version/-v, errores de datos como
 # mensajes) y textos de Typer en español, desde yutani (N-ECO-14).
@@ -36,6 +36,19 @@ app = crear_app(
     "🌀 SEBASTIAN — Analizador de llamadas recursivas, consumo de stack frame y riesgos de desborde de pila en C.",
     add_completion=True,
 )
+
+
+def _avisar_si_no_compila(fuente: Path, includes: List[Path]) -> Optional[List[str]]:
+    """El análisis estático lee el texto sin compilarlo: sin este aviso, un archivo roto da un
+    resultado que parece bueno. Devuelve los errores."""
+    errores = errores_de_compilacion(fuente, includes)
+    if errores is None:
+        err_console.print("[yellow]⚠ Falta gcc: no se pudo comprobar si el archivo compila.[/yellow]")
+    elif errores:
+        detalle = "\n".join(f"• {escape(error)}" for error in errores)
+        err_console.print(Panel(f"{escape(fuente.name)} no compila: este análisis puede no ser confiable.\n\n{detalle}",
+                                title="❌ El código no compila", border_style="red"))
+    return errores
 
 
 def _informar_sin_traza(diag: DiagnosticoRecursion) -> None:
@@ -59,6 +72,8 @@ def trace_cmd(
     fuente: Path = typer.Argument(..., help="Archivo C con la función recursiva a trazar."),
     funcion: Optional[str] = typer.Option(None, "--function", "-f", help="Nombre de la función recursiva a trazar."),
     args: Optional[List[str]] = typer.Argument(None, help="Argumentos para el programa al ejecutar."),
+    include: Optional[List[Path]] = typer.Option(None, "--include", "-I", help=AYUDA_INCLUDE),
+    source: Optional[List[Path]] = typer.Option(None, "--source", "-s", help="Otro .c del programa, como el que tiene main (se puede repetir)."),
     stdin: Optional[str] = typer.Option(None, "--stdin", "-i", help="Entrada estándar para el programa."),
     tree_view: bool = typer.Option(True, "--tree/--no-tree", help="Mostrar árbol de llamadas en terminal."),
     mermaid_view: bool = typer.Option(False, "--mermaid", "-m", help="Emitir diagrama en formato Mermaid."),
@@ -72,11 +87,18 @@ def trace_cmd(
         err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
         raise typer.Exit(code=2)
 
+    for otra in source or []:
+        if not otra.is_file():
+            err_console.print(f"[red]Error:[/red] No se encontró el archivo '{otra}'.")
+            raise typer.Exit(code=2)
+
     diag = trazar_recursion_dinamica(
         archivo_c=fuente,
         funcion_target=funcion or "",
         args_programa=args,
         stdin_data=stdin or "",
+        includes=include or [],
+        otras_fuentes=source or [],
     )
 
     codigo = 0 if diag.arbol else 1
@@ -119,14 +141,19 @@ def trace_cmd(
         console.print(Panel(rec_text, title="💡 Recomendaciones Pedagógicas", border_style="yellow"))
 
 
-def generar_seccion_markdown(reportes: list) -> str:
+def generar_seccion_markdown(reportes: list, errores: Optional[List[str]] = None) -> str:
     """Genera sección de análisis de recursión y stack frames para Dredd."""
     recursivas = [r for r in reportes if r.es_recursiva]
-    status = "fail" if any(not r.tiene_caso_base or r.riesgo_overflow == "ALTO" for r in recursivas) else "ok"
+    riesgo = any(not r.tiene_caso_base or r.riesgo_overflow == "ALTO" for r in recursivas)
+    status = "fail" if errores or riesgo else "ok"
     lines = [
         f"<!-- dredd-section: sebastian, tool=sebastian, version=1.0.0, status={status} -->\n",
         "## Análisis de Recursión y Consumo de Pila (Sebastian)\n",
     ]
+    if errores:
+        lines.append("> [!WARNING]\n> **El código no compila:** este análisis puede no ser confiable.")
+        lines.extend(f"> - {error}" for error in errores)
+        lines.append("")
     lines.append(f"- **Funciones analizadas:** {len(reportes)}")
     lines.append(f"- **Funciones recursivas:** {len(recursivas)}\n")
     if not recursivas:
@@ -149,6 +176,7 @@ def analyze_cmd(
     json_output: bool = typer.Option(False, "--json", help="Emitir reporte en JSON."),
     output_md: Optional[Path] = typer.Option(None, "--md", "--output-md", "-o", help="Generar sección de reporte en formato Markdown para fusión en Dredd."),
     fail_on_high_risk: bool = typer.Option(False, "--fail-on-high-risk", help="Salir con código 1 si alguna función tiene riesgo de overflow ALTO (por defecto siempre 0)."),
+    include: Optional[List[Path]] = typer.Option(None, "--include", "-I", help=AYUDA_INCLUDE),
 ) -> None:
     """Analiza estáticamente todas las funciones del archivo en busca de recursión y riesgos de desbordamiento.
 
@@ -162,24 +190,13 @@ def analyze_cmd(
         err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
         raise typer.Exit(code=2)
 
-    errores = errores_de_compilacion(fuente)
-    if errores:
-        detalle = "\n".join(f"• {escape(error)}" for error in errores)
-        err_console.print(Panel(f"{escape(fuente.name)} no compila: este análisis puede no ser confiable.\n\n{detalle}",
-                                title="❌ El código no compila", border_style="red"))
-
-    contenido = fuente.read_text(encoding="utf-8")
-    funciones = extraer_funciones_c(contenido)
-
-    reportes = []
-    for fn_name, cuerpo, l_start, _ in funciones:
-        diag = analizar_estatico_funcion(fn_name, cuerpo, fuente, l_start)
-        reportes.append(diag)
+    errores = _avisar_si_no_compila(fuente, include or [])
+    reportes = analizar_archivo(fuente.read_text(encoding="utf-8"), fuente, include or [])
 
     codigo = 1 if fail_on_high_risk and any(r.es_recursiva and r.riesgo_overflow == "ALTO" for r in reportes) else 0
 
     if output_md:
-        md_text = generar_seccion_markdown(reportes)
+        md_text = generar_seccion_markdown(reportes, errores)
         output_md.parent.mkdir(parents=True, exist_ok=True)
         output_md.write_text(md_text, encoding="utf-8")
         console.print(f"[green]✓ Sección Markdown generada en:[/green] [cyan]{output_md}[/cyan]")
@@ -231,18 +248,15 @@ def analyze_cmd(
 def report_cmd(
     fuente: Path = typer.Argument(..., help="Archivo C a analizar."),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Ruta de destino del archivo Markdown."),
+    include: Optional[List[Path]] = typer.Option(None, "--include", "-I", help=AYUDA_INCLUDE),
 ) -> None:
     """Genera directamente la sección de reporte Markdown de SEBASTIAN para Dredd."""
     if not fuente.is_file():
         err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
         raise typer.Exit(code=2)
-    contenido = fuente.read_text(encoding="utf-8")
-    funciones = extraer_funciones_c(contenido)
-    reportes = []
-    for fn_name, cuerpo, l_start, _ in funciones:
-        diag = analizar_estatico_funcion(fn_name, cuerpo, fuente, l_start)
-        reportes.append(diag)
-    md_content = generar_seccion_markdown(reportes)
+    errores = _avisar_si_no_compila(fuente, include or [])
+    reportes = analizar_archivo(fuente.read_text(encoding="utf-8"), fuente, include or [])
+    md_content = generar_seccion_markdown(reportes, errores)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(md_content, encoding="utf-8")

@@ -9,10 +9,11 @@ import signal
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from sebastian.core.masking import enmascarar_comentarios_y_literales
 from sebastian.core.models import DiagnosticoRecursion, NodoLlamada
+from sebastian.core.pila import directorios_include
 
 
 # El árbol se recorre con recursión y se dibuja en la terminal: una recursión infinita llega a
@@ -20,14 +21,17 @@ from sebastian.core.models import DiagnosticoRecursion, NodoLlamada
 PROFUNDIDAD_ARBOL = 50
 NODOS_ARBOL = 2000
 TIEMPO_LIMITE = 3.0
-_TRAZA = re.compile(r"\[SEB:(ENTER|EXIT):(\d+):(\d+)(?::[^\]\n]*)?\]")
+_TRAZA = re.compile(r"\[SEB:(ENTER|EXIT):(\d+):(\d+)(?::([^\]\n]*))?\]")
+# Los parámetros admiten un nivel de paréntesis, el de un puntero a función: `int (*cmp)(int, int)`.
+_PARAMETROS = r"\((?:[^()]|\([^()]*\))*\)"
+_TITULO_SIN_TRADUCIR = "Diagnóstico del compilador"
 
 
 def extraer_funciones_c(contenido: str) -> List[Tuple[str, str, int, int]]:
     """Extrae las funciones definidas en un archivo C: (nombre, cuerpo, linea_inicio, linea_fin)."""
     # Regex para cabecera de función
     re_fn = re.compile(
-        r"^\s*(?:[a-zA-Z0-9_*]+\s+)+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*\{",
+        rf"^[ \t]*(?:[a-zA-Z_]\w*[\s*]+)+([a-zA-Z_]\w*)\s*{_PARAMETROS}\s*\{{",
         re.MULTILINE,
     )
     funciones = []
@@ -58,18 +62,67 @@ def extraer_funciones_c(contenido: str) -> List[Tuple[str, str, int, int]]:
     return funciones
 
 
+def _llamadas_entre_funciones(funciones: Sequence[Tuple[str, str, int, int]]) -> Dict[str, Set[str]]:
+    nombres = {f[0] for f in funciones}
+    grafo: Dict[str, Set[str]] = {}
+    for nombre, cuerpo, _, _ in funciones:
+        limpio = enmascarar_comentarios_y_literales(cuerpo)
+        grafo[nombre] = (set(re.findall(r"\b([a-zA-Z_]\w*)\s*\(", limpio[limpio.find("{"):])) & nombres) - {nombre}
+    return grafo
+
+
+def recursion_mutua(funciones: Sequence[Tuple[str, str, int, int]]) -> Dict[str, List[str]]:
+    """Para cada función que se llama a sí misma a través de otras, esas otras (f → g → f)."""
+    grafo = _llamadas_entre_funciones(funciones)
+
+    def alcanzables(origen: str) -> Set[str]:
+        vistos: Set[str] = set()
+        pendientes = list(grafo[origen])
+        while pendientes:
+            actual = pendientes.pop()
+            if actual not in vistos:
+                vistos.add(actual)
+                pendientes.extend(grafo[actual])
+        return vistos
+
+    alcance = {nombre: alcanzables(nombre) for nombre in grafo}
+    ciclos = {nombre: sorted(otra for otra in alcance[nombre] if otra != nombre and nombre in alcance[otra])
+              for nombre in grafo}
+    return {nombre: otras for nombre, otras in ciclos.items() if otras}
+
+
+def analizar_archivo(contenido: str, archivo: Path, includes: Sequence[Path] = ()) -> List[DiagnosticoRecursion]:
+    """El análisis estático de cada función del archivo, con la recursión mutua incluida."""
+    funciones = extraer_funciones_c(contenido)
+    mutuas = recursion_mutua(funciones)
+    cuerpos = {f[0]: f[1] for f in funciones}
+    return [
+        analizar_estatico_funcion(nombre, cuerpo, archivo, linea, includes=includes,
+                                  companeras={otra: cuerpos[otra] for otra in mutuas.get(nombre, [])})
+        for nombre, cuerpo, linea, _ in funciones
+    ]
+
+
 def analizar_estatico_funcion(
     nombre_fn: str,
     cuerpo: str,
     archivo: Path,
     linea_inicio: int = 1,
+    includes: Sequence[Path] = (),
+    companeras: Optional[Dict[str, str]] = None,
 ) -> DiagnosticoRecursion:
-    """Realiza un análisis estático de una función para detectar patrones recursivos."""
+    """Realiza un análisis estático de una función para detectar patrones recursivos.
+
+    `companeras`: las funciones con las que forma recursión mutua, con sus cuerpos; el caso base
+    puede estar en cualquiera de ellas.
+    """
+    companeras = companeras or {}
     # Los comentarios y literales se blanquean antes de buscar: sin esto, el
     # nombre de la función mencionado en un comentario o en un printf cuenta
     # como llamada recursiva y la función se reporta como recursiva sin serlo.
     cuerpo_analizable = enmascarar_comentarios_y_literales(cuerpo)
-    patron_llamada = re.compile(rf"\b{nombre_fn}\s*\(")
+    nombres = "|".join(re.escape(nombre) for nombre in [nombre_fn, *companeras])
+    patron_llamada = re.compile(rf"\b(?:{nombres})\s*\(")
     llamadas = list(patron_llamada.finditer(cuerpo_analizable[cuerpo_analizable.find('{'):]))
 
     es_recursiva = len(llamadas) > 0
@@ -83,16 +136,22 @@ def analizar_estatico_funcion(
             linea_inicio=linea_inicio,
         )
 
-    # Detectar caso base (presencia de if con return antes de la llamada recursiva)
-    tiene_caso_base = bool(re.search(r"if\s*\([^)]+\)\s*\{?[^}]*return", cuerpo_analizable))
+    # Detectar caso base (presencia de if con return antes de la llamada recursiva,
+    # o un operador ternario, que elige entre la llamada y otro valor).
+    tiene_caso_base = any(
+        re.search(r"if\s*\([^)]+\)\s*\{?[^}]*return|\?[^;]*:", enmascarar_comentarios_y_literales(texto))
+        for texto in [cuerpo, *companeras.values()]
+    )
 
     # Detectar tipo de recursión
     total_calls = len(llamadas)
     # Recursión de cola (tail call): 'return fn(...);' sin operadores adicionales
-    re_tail = re.compile(rf"return\s+{nombre_fn}\s*\([^;]+\);")
+    re_tail = re.compile(rf"return\s+(?:{nombres})\s*\([^;]+\);")
     es_tail = bool(re_tail.search(cuerpo_analizable))
 
-    if total_calls > 1:
+    if companeras:
+        tipo = "mutua"
+    elif total_calls > 1:
         tipo = "arbol"
     elif es_tail:
         tipo = "cola"
@@ -118,7 +177,10 @@ def analizar_estatico_funcion(
         riesgo = "MEDIO" if tiene_caso_base else "ALTO"
         recomendaciones.append("La recursión en árbol tiene complejidad exponencial $O(2^n)$. Considerá memoización o programación dinámica.")
 
-    if tipo == "cola":
+    if tipo == "mutua":
+        recomendaciones.append(f"Recursión mutua con {', '.join(companeras)}: se llaman entre sí, y el caso base "
+                               "puede estar en cualquiera de ellas.")
+    elif tipo == "cola":
         recomendaciones.append("La función utiliza recursión de cola (Tail Recursion). Compiladores con -O2 la optimizarán a un lazo iterativo sin consumo de Stack.")
     elif es_recursiva and tipo == "lineal":
         recomendaciones.append("La función realiza operaciones tras la llamada recursiva (ej: n * f(n-1)). Transformarla a recursión de cola con un acumulador optimizará la pila.")
@@ -134,15 +196,15 @@ def analizar_estatico_funcion(
         riesgo_overflow=riesgo,
         recomendaciones=recomendaciones,
     )
-    completar_limite_de_pila(diag)
+    completar_limite_de_pila(diag, includes)
     return diag
 
 
-def completar_limite_de_pila(diag: DiagnosticoRecursion) -> None:
+def completar_limite_de_pila(diag: DiagnosticoRecursion, includes: Sequence[Path] = ()) -> None:
     """Cuántas llamadas anidadas entran en la pila antes del Stack Overflow (QoL #870)."""
     from sebastian.core.pila import limite_de_pila, marco_compilado, profundidad_maxima
 
-    marco = marco_compilado(Path(diag.archivo), diag.funcion)
+    marco = marco_compilado(Path(diag.archivo), diag.funcion, includes)
     if marco:
         diag.consumo_stack_por_frame_bytes = marco
         diag.marco_medido_por_gcc = True
@@ -162,34 +224,43 @@ def completar_limite_de_pila(diag: DiagnosticoRecursion) -> None:
     diag.recomendaciones.append(texto)
 
 
-def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[Any]:
+def _flags_include(includes: Sequence[Path]) -> List[str]:
+    return [f"-I{carpeta}" for carpeta in includes]
+
+
+def _compilar_con_daedalus(fuentes: Sequence[Path], binario: Path, includes: Sequence[Path] = ()) -> Optional[Any]:
     try:
         from daedalus.core.compiler import compilar_archivos
     except ImportError:
         return None  # sin el extra `ecosistema` se usa el camino propio
-    return compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
+    return compilar_archivos(list(fuentes), binario_salida=binario,
+                             flags_adicionales=["-g", "-O0", *_flags_include(includes)])
 
 
-def _errores_traducidos(archivo: Path) -> List[str]:
+def _errores_traducidos(archivo: Path, includes: Sequence[Path]) -> List[str]:
     """Los errores de `archivo` explicados por daedalus; vacío si no está o no los reconoce."""
     with tempfile.TemporaryDirectory() as tmp:
-        res = _compilar_con_daedalus(archivo, Path(tmp) / "prog")
+        res = _compilar_con_daedalus([archivo], Path(tmp) / "prog", includes)
     if res is None:
         return []
-    return [f"{archivo.name}:{d.linea}: {d.titulo}. {d.sugerencia}".strip()
-            for d in res.diagnosticos if d.severidad == "error"]
+    errores = [f"{archivo.name}:{d.linea}: {d.mensaje_original}" if d.titulo == _TITULO_SIN_TRADUCIR
+               else f"{archivo.name}:{d.linea}: {d.titulo}. {d.sugerencia}".strip()
+               for d in res.diagnosticos if d.severidad == "error"]
+    return list(dict.fromkeys(errores))
 
 
-def errores_de_compilacion(archivo: Path) -> Optional[List[str]]:
+def errores_de_compilacion(archivo: Path, includes: Sequence[Path] = ()) -> Optional[List[str]]:
     """Los errores que impiden compilar `archivo`: vacío si compila, None si no hay gcc para saberlo."""
+    carpetas = directorios_include(archivo, includes)
     gcc = shutil.which("gcc")
     if gcc is None:
         return None
-    res = subprocess.run([gcc, "-std=c11", "-fsyntax-only", str(archivo)], capture_output=True, text=True)
+    res = subprocess.run([gcc, "-std=c11", "-fsyntax-only", *_flags_include(carpetas), str(archivo)],
+                         capture_output=True, text=True, errors="replace")
     if res.returncode == 0:
         return []
     crudos = [linea for linea in res.stderr.splitlines() if "error:" in linea]
-    return (_errores_traducidos(archivo) or crudos or res.stderr.splitlines())[:5]
+    return (_errores_traducidos(archivo, carpetas) or crudos or res.stderr.splitlines())[:5]
 
 
 def _sin_traza(diag: DiagnosticoRecursion, causa: str, motivo: str) -> DiagnosticoRecursion:
@@ -222,19 +293,27 @@ def _describir_corte(codigo: int, error_tipo: Optional[str]) -> Optional[str]:
     return f"terminó con {nombre}"
 
 
-def _ejecutar(binario: Path, args: Optional[List[str]], stdin_data: str) -> Tuple[str, Optional[str]]:
-    """Corre el programa instrumentado: (lo que escribió, por qué se cortó)."""
+class _Ejecucion(NamedTuple):
+    salida: str
+    corte: Optional[str]  # por qué se cortó; None si terminó solo
+    codigo: int
+    errores: str
+
+
+def _ejecutar(binario: Path, args: Optional[List[str]], stdin_data: str) -> _Ejecucion:
+    """Corre el programa instrumentado."""
     aislado = _try_import_nostromo()
     if aislado:
         res = aislado(binario, args=args, stdin_texto=stdin_data, timeout_segundos=TIEMPO_LIMITE, memoria_mb=64)
-        return res.stdout, _describir_corte(res.codigo_retorno, res.error_tipo)
+        return _Ejecucion(res.stdout, _describir_corte(res.codigo_retorno, res.error_tipo), res.codigo_retorno,
+                          res.stderr)
     try:
         run = subprocess.run([str(binario)] + (args or []), input=stdin_data, capture_output=True, text=True,
-                             timeout=TIEMPO_LIMITE)
+                             errors="replace", timeout=TIEMPO_LIMITE)
     except subprocess.TimeoutExpired as exc:
         salida = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        return salida, _describir_corte(0, "TIMEOUT")
-    return run.stdout, _describir_corte(run.returncode, None)
+        return _Ejecucion(salida, _describir_corte(0, "TIMEOUT"), 0, "")
+    return _Ejecucion(run.stdout, _describir_corte(run.returncode, None), run.returncode, run.stderr)
 
 
 def _try_import_nostromo():
@@ -245,26 +324,55 @@ def _try_import_nostromo():
     return ejecutar_aislado
 
 
+def _definen(nombres: Sequence[str], archivo: Path) -> List[Path]:
+    """Los otros .c de la carpeta de `archivo` que definen alguna de esas funciones."""
+    buscados = set(nombres)
+    return [vecino for vecino in sorted(archivo.parent.glob("*.c")) if vecino != archivo and buscados & {
+        f[0] for f in extraer_funciones_c(vecino.read_text(encoding="utf-8", errors="replace"))}]
+
+
+def _pista_source(rutas: Sequence[Path]) -> str:
+    return " ".join(f"--source {ruta}" for ruta in rutas)
+
+
+def _motivo_sin_llamadas(nombre_fn: str, ejecucion: _Ejecucion) -> str:
+    texto = _TRAZA.sub("", ejecucion.errores or ejecucion.salida)
+    ultima = next((linea.strip() for linea in reversed(texto.splitlines()) if linea.strip()), "")
+    codigo = f" con código {ejecucion.codigo}" if ejecucion.codigo else ""
+    dijo = f" (lo último que escribió: «{ultima[:120]}»)" if ultima else ""
+    return (f"El programa terminó{codigo} sin llamar a {nombre_fn}(){dijo}: revisá que main llegue hasta esa "
+            "llamada, y si necesita datos pasalos con --stdin o como argumentos.")
+
+
 def trazar_recursion_dinamica(
     archivo_c: Path,
     funcion_target: str,
     args_programa: Optional[List[str]] = None,
     stdin_data: str = "",
+    includes: Sequence[Path] = (),
+    otras_fuentes: Sequence[Path] = (),
 ) -> DiagnosticoRecursion:
-    """Instrumenta el código para registrar en tiempo de ejecución cada invocación recursiva."""
+    """Instrumenta el código para registrar en tiempo de ejecución cada invocación recursiva.
+
+    `otras_fuentes`: los demás .c del programa (el que tiene main, por ejemplo), que se compilan sin
+    instrumentar. `includes`: carpetas de headers, además del `include/` que se detecta solo.
+    """
     archivo_c = Path(archivo_c)
     if not archivo_c.is_file():
         raise FileNotFoundError(f"No se encontró el archivo: {archivo_c}")
 
-    errores = errores_de_compilacion(archivo_c)
-    if errores:
-        diag = _sin_traza(_diagnostico_vacio(archivo_c, funcion_target), "no_compila",
-                          f"{archivo_c.name} no compila: corregí los errores y volvé a trazar.")
-        diag.errores_compilacion = errores
-        return diag
+    otras_fuentes = [Path(otra) for otra in otras_fuentes]
+    for fuente in [archivo_c, *otras_fuentes]:
+        errores = errores_de_compilacion(fuente, includes)
+        if errores:
+            diag = _sin_traza(_diagnostico_vacio(archivo_c, funcion_target), "no_compila",
+                              f"{fuente.name} no compila: corregí los errores y volvé a trazar.")
+            diag.errores_compilacion = errores
+            return diag
 
     contenido = archivo_c.read_text(encoding="utf-8")
     funciones = extraer_funciones_c(contenido)
+    mutuas = recursion_mutua(funciones)
 
     # Buscar la función objetivo
     fn_info = None
@@ -281,51 +389,63 @@ def trazar_recursion_dinamica(
     if not fn_info:
         # Sin --function: la primera función recursiva que no sea main
         for fn_name, cuerpo, l_start, _ in funciones:
-            if fn_name != "main" and re.search(rf"\b{fn_name}\s*\(", cuerpo[cuerpo.find('{'):]):
+            limpio = enmascarar_comentarios_y_literales(cuerpo)
+            if fn_name != "main" and (fn_name in mutuas or re.search(rf"\b{fn_name}\s*\(", limpio[limpio.find('{'):])):
                 fn_info = (fn_name, cuerpo, l_start)
                 break
 
     if not fn_info:
         return _sin_traza(_diagnostico_vacio(archivo_c, ""), "sin_recursion",
-                          f"{archivo_c.name} no tiene funciones recursivas: indicá con --function cuál querés trazar.")
+                          f"No encontré funciones recursivas en {archivo_c.name}: indicá con --function cuál querés "
+                          "trazar.")
 
     nombre_fn, cuerpo_fn, l_start = fn_info
-    diag_estatico = analizar_estatico_funcion(nombre_fn, cuerpo_fn, archivo_c, l_start)
+    cuerpos = {f[0]: f[1] for f in funciones}
+    companeras = {otra: cuerpos[otra] for otra in mutuas.get(nombre_fn, [])}
+    diag_estatico = analizar_estatico_funcion(nombre_fn, cuerpo_fn, archivo_c, l_start, includes=includes,
+                                              companeras=companeras)
 
     # Sin una medición real se informa el análisis estático tal cual, sin inventar un árbol: una
     # profundidad fabricada es indistinguible de una medida y lleva a decisiones equivocadas sobre
     # el riesgo de desborde de pila.
-    if not any(f[0] == "main" for f in funciones):
+    tiene_main = any(f[0] == "main" for f in funciones) or any(
+        f[0] == "main" for otra in otras_fuentes
+        for f in extraer_funciones_c(otra.read_text(encoding="utf-8", errors="replace")))
+    if not tiene_main:
+        con_main = _definen(["main"], archivo_c)
+        pista = (f"Sumá el que lo tiene con {_pista_source(con_main[:1])}." if con_main else
+                 f"Agregá uno que llame a {nombre_fn}(), o pasá el archivo que lo tiene con --source.")
         return _sin_traza(diag_estatico, "sin_main",
-                          f"{archivo_c.name} no tiene main: no hay programa que ejecutar. Agregá uno que llame a "
-                          f"{nombre_fn}() para ver sus llamadas.")
+                          f"{archivo_c.name} no tiene main: no hay programa que ejecutar. {pista}")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         binario = tmp_path / "prog_instrumentado"
         fuente_inst = tmp_path / "instrumentado.c"
-        fuente_inst.write_text(_generar_codigo_instrumentado(contenido, nombre_fn), encoding="utf-8")
+        fuente_inst.write_text(_generar_codigo_instrumentado(contenido, nombre_fn, list(companeras)),
+                               encoding="utf-8")
 
-        problema = _compilar_instrumentado(fuente_inst, binario, archivo_c)
+        # La copia vive en otra carpeta: sus #include "..." se buscan en la del original.
+        carpetas = [archivo_c.resolve().parent, *directorios_include(archivo_c, includes)]
+        problema = _compilar_instrumentado([fuente_inst, *otras_fuentes], binario, archivo_c, carpetas)
         if problema:
             return _sin_traza(diag_estatico, *problema)
 
         try:
-            salida, corte = _ejecutar(binario, args_programa, stdin_data)
+            ejecucion = _ejecutar(binario, args_programa, stdin_data)
         except Exception as exc:
             return _sin_traza(diag_estatico, "fallo_ejecucion", f"No se pudo ejecutar el programa: {exc}")
 
     arbol, max_depth, total_calls, recortado = _parsear_trazas_instrumentadas(
-        salida, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
+        ejecucion.salida, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
     )
+    corte = ejecucion.corte
     if not arbol:
         if corte and "no terminó" in corte:
             return _sin_traza(diag_estatico, "tiempo_agotado", f"El programa {corte}")
         if corte:
             return _sin_traza(diag_estatico, "fallo_ejecucion", f"El programa {corte} antes de llamar a {nombre_fn}().")
-        return _sin_traza(diag_estatico, "sin_llamadas",
-                          f"El programa terminó sin llamar a {nombre_fn}(): revisá que main llegue hasta esa "
-                          "llamada, y si necesita datos pasalos con --stdin o como argumentos.")
+        return _sin_traza(diag_estatico, "sin_llamadas", _motivo_sin_llamadas(nombre_fn, ejecucion))
 
     diag_estatico.origen_medicion = "dinamica"
     diag_estatico.arbol = arbol
@@ -334,34 +454,41 @@ def trazar_recursion_dinamica(
     diag_estatico.profundidad_maxima = max_depth
     diag_estatico.total_llamadas = total_calls
     diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
-    completar_limite_de_pila(diag_estatico)
+    completar_limite_de_pila(diag_estatico, includes)
     return diag_estatico
 
 
-def _compilar_instrumentado(fuente: Path, binario: Path, original: Path) -> Optional[Tuple[str, str]]:
+def _compilar_instrumentado(fuentes: Sequence[Path], binario: Path, original: Path,
+                            includes: Sequence[Path] = ()) -> Optional[Tuple[str, str]]:
     """Compila la versión instrumentada; (causa, motivo) si no se pudo."""
-    res = _compilar_con_daedalus(fuente, binario)
+    res = _compilar_con_daedalus(fuentes, binario, includes)
     if res is not None:
         exito, salida = res.exito, res.stderr_crudo
     else:
         gcc = shutil.which("gcc")
         if gcc is None:
             return "sin_compilador", "Falta gcc: hace falta para ejecutar el programa y trazar sus llamadas."
-        proc = subprocess.run([gcc, "-g", "-O0", "-std=c11", str(fuente), "-o", str(binario), "-lm"],
+        proc = subprocess.run([gcc, "-g", "-O0", "-std=c11", *_flags_include(includes), *map(str, fuentes),
+                               "-o", str(binario), "-lm"],
                               capture_output=True, text=True)
         exito, salida = proc.returncode == 0, proc.stderr
     if exito:
         return None
     faltan = sorted(set(re.findall(r"undefined reference to [`'\"](\w+)", salida)))
     if faltan:
-        return "no_enlaza", (f"{original.name} compila, pero falta el código de {', '.join(faltan)}: sebastian "
-                             "traza un solo archivo, con todo lo que usa definido en él.")
+        vecinos = _definen(faltan, original)
+        pista = f"sumalo con {_pista_source(vecinos)}" if vecinos else "pasá el archivo que lo define con --source"
+        return "no_enlaza", f"{original.name} compila, pero falta el código de {', '.join(faltan)}: {pista}."
+    repetidas = sorted(set(re.findall(r"multiple definition of [`'\"](\w+)", salida)))
+    if repetidas:
+        return "no_enlaza", (f"{', '.join(repetidas)} está definido en más de un archivo: dejá un solo --source "
+                             "con esa definición.")
     primero = next((linea.split("error:", 1)[1].strip() for linea in salida.splitlines() if "error:" in linea), "")
     return "instrumentacion", (f"{original.name} compila, pero no la copia que sebastian le agrega el registro de "
                                f"llamadas{': ' + primero if primero else '.'}")
 
 
-def _generar_codigo_instrumentado(codigo_original: str, funcion_target: str) -> str:
+def _generar_codigo_instrumentado(codigo_original: str, funcion_target: str, otras: Sequence[str] = ()) -> str:
     """Inserta macros y hooks de logging en la función C."""
     header = """
 #include <stdio.h>
@@ -392,9 +519,11 @@ static inline void __seb_enter_hook(const char *fn, int *my_id, int *my_depth) {
     __seb_enter_hook(fn, &__my_id, &__my_depth); \\
     __seb_scope_t __my_scope __attribute__((cleanup(__seb_exit_hook))) = { __my_id, __my_depth };
 """
-    # Insertar __SEB_ENTER justo después de la primera llave de funcion_target
-    patron = rf"(\b{funcion_target}\s*\([^)]*\)\s*\{{)"
-    codigo_mod = re.sub(patron, rf'\1\n    __SEB_ENTER("{funcion_target}");', codigo_original, count=1)
+    # Insertar __SEB_ENTER justo después de la primera llave de cada función
+    codigo_mod = codigo_original
+    for nombre in [funcion_target, *otras]:
+        patron = rf"(\b{nombre}\s*{_PARAMETROS}\s*\{{)"
+        codigo_mod = re.sub(patron, rf'\1\n    __SEB_ENTER("{nombre}");', codigo_mod, count=1)
     return header + "\n" + codigo_mod
 
 
@@ -424,7 +553,7 @@ def _parsear_trazas_instrumentadas(
                 continue
             nodo = NodoLlamada(
                 id=call_id,
-                funcion=nombre_fn,
+                funcion=marca.group(4) or nombre_fn,
                 argumentos=f"call_{call_id}",
                 profundidad=depth,
                 stack_bytes=depth * frame_bytes,
