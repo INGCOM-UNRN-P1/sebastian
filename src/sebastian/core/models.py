@@ -52,6 +52,14 @@ class DiagnosticoRecursion:
     # real.
     origen_medicion: str = "estatica"
     motivo_sin_medicion: Optional[str] = None
+    # Por qué no hay traza, para distinguirlo sin leer el texto: "no_compila", "no_enlaza",
+    # "sin_main", "sin_compilador", "instrumentacion", "funcion_inexistente", "sin_recursion",
+    # "sin_llamadas", "tiempo_agotado", "fallo_ejecucion".
+    causa_sin_medicion: Optional[str] = None
+    errores_compilacion: List[str] = field(default_factory=list)
+    # Hubo traza, pero el programa no terminó bien (señal, tiempo límite) o el árbol no entra entero.
+    ejecucion_cortada: Optional[str] = None
+    arbol_recortado: bool = False
     # QoL #870: cuántas llamadas anidadas entran en la pila (límite / bytes por marco).
     limite_stack_bytes: int = 0
     profundidad_maxima_estimada: int = 0
@@ -59,7 +67,7 @@ class DiagnosticoRecursion:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "funcion": self.funcion,
             "archivo": str(self.archivo),
             "es_recursiva": self.es_recursiva,
@@ -68,6 +76,10 @@ class DiagnosticoRecursion:
             "linea_inicio": self.linea_inicio,
             "origen_medicion": self.origen_medicion,
             "motivo_sin_medicion": self.motivo_sin_medicion,
+            "causa_sin_medicion": self.causa_sin_medicion,
+            "errores_compilacion": self.errores_compilacion,
+            "ejecucion_cortada": self.ejecucion_cortada,
+            "arbol_recortado": self.arbol_recortado,
             "total_llamadas": self.total_llamadas,
             "profundidad_maxima": self.profundidad_maxima,
             "consumo_stack_por_frame_bytes": self.consumo_stack_por_frame_bytes,

@@ -9,15 +9,20 @@ from typing import List, Optional
 import typer
 from yutani.cli import crear_app
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
 from sebastian import __version__
 from sebastian.core.analyzer import (
+    NODOS_ARBOL,
+    PROFUNDIDAD_ARBOL,
     analizar_estatico_funcion,
+    errores_de_compilacion,
     extraer_funciones_c,
     trazar_recursion_dinamica,
 )
+from sebastian.core.models import DiagnosticoRecursion
 from sebastian.core.visualizer import construir_rich_tree, generar_mermaid_diagram
 
 console = Console()
@@ -33,6 +38,22 @@ app = crear_app(
 )
 
 
+def _informar_sin_traza(diag: DiagnosticoRecursion) -> None:
+    """Por qué no hay árbol: sin esto, una traza fallida se ve como un programa sin llamadas."""
+    detalle = "\n".join(f"• {escape(error)}" for error in diag.errores_compilacion)
+    texto = escape(diag.motivo_sin_medicion or "No se pudo trazar la función.") + (f"\n\n{detalle}" if detalle else "")
+    titulo = "❌ El código no compila" if diag.errores_compilacion else "⚠️ No se pudo obtener la traza"
+    err_console.print(Panel(texto, title=titulo, border_style="red"))
+
+
+def _avisar_traza_incompleta(diag: DiagnosticoRecursion) -> None:
+    if diag.ejecucion_cortada:
+        err_console.print(f"[yellow]⚠ El programa {escape(diag.ejecucion_cortada)}. La traza llega hasta ahí.[/yellow]")
+    if diag.arbol_recortado:
+        err_console.print(f"[yellow]⚠ El árbol muestra hasta {PROFUNDIDAD_ARBOL} niveles y {NODOS_ARBOL} llamadas; "
+                          "los totales cuentan todas.[/yellow]")
+
+
 @app.command("trace")
 def trace_cmd(
     fuente: Path = typer.Argument(..., help="Archivo C con la función recursiva a trazar."),
@@ -43,7 +64,10 @@ def trace_cmd(
     mermaid_view: bool = typer.Option(False, "--mermaid", "-m", help="Emitir diagrama en formato Mermaid."),
     json_output: bool = typer.Option(False, "--json", help="Emitir reporte en formato JSON."),
 ) -> None:
-    """Ejecuta el código instrumentado, traza las llamadas recursivas y visualiza el árbol de ejecución."""
+    """Ejecuta el código instrumentado, traza las llamadas recursivas y visualiza el árbol de ejecución.
+
+    Códigos de salida: 0 hay traza, 1 no se pudo obtener (se explica por qué) y 2 archivo inexistente.
+    """
     if not fuente.is_file():
         err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
         raise typer.Exit(code=2)
@@ -55,12 +79,19 @@ def trace_cmd(
         stdin_data=stdin or "",
     )
 
+    codigo = 0 if diag.arbol else 1
+
     if json_output:
         print(json.dumps(diag.to_dict(), indent=2, ensure_ascii=False))
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=codigo)
 
-    if mermaid_view and diag.arbol:
+    if not diag.arbol:
+        _informar_sin_traza(diag)
+        raise typer.Exit(code=codigo)
+
+    if mermaid_view:
         console.print(generar_mermaid_diagram(diag.arbol))
+        _avisar_traza_incompleta(diag)
         raise typer.Exit(code=0)
 
     # Panel de Resumen
@@ -80,6 +111,7 @@ def trace_cmd(
     if tree_view and diag.arbol:
         console.print("\n[bold]🌲 Árbol de Ejecución de Llamadas:[/bold]")
         console.print(construir_rich_tree(diag.arbol))
+    _avisar_traza_incompleta(diag)
 
     # Recomendaciones
     if diag.recomendaciones:
@@ -120,12 +152,21 @@ def analyze_cmd(
 ) -> None:
     """Analiza estáticamente todas las funciones del archivo en busca de recursión y riesgos de desbordamiento.
 
+    El análisis lee el fuente sin compilarlo: si el archivo no compila lo avisa, porque el resultado
+    puede no ser confiable.
+
     Códigos de salida: 0 análisis correcto, 2 archivo inexistente y, solo con
     --fail-on-high-risk, 1 si hay riesgo ALTO.
     """
     if not fuente.is_file():
         err_console.print(f"[red]Error:[/red] No se encontró el archivo '{fuente}'.")
         raise typer.Exit(code=2)
+
+    errores = errores_de_compilacion(fuente)
+    if errores:
+        detalle = "\n".join(f"• {escape(error)}" for error in errores)
+        err_console.print(Panel(f"{escape(fuente.name)} no compila: este análisis puede no ser confiable.\n\n{detalle}",
+                                title="❌ El código no compila", border_style="red"))
 
     contenido = fuente.read_text(encoding="utf-8")
     funciones = extraer_funciones_c(contenido)

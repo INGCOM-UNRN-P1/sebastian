@@ -39,14 +39,14 @@ def test_parsear_trazas_instrumentadas():
         "[SEB:EXIT:2:2]\n"
         "[SEB:EXIT:1:1]\n"
     )
-    raiz, max_depth, total = _parsear_trazas_instrumentadas(log, "factorial")
+    raiz, max_depth, total, _ = _parsear_trazas_instrumentadas(log, "factorial")
     assert raiz is not None
     assert max_depth == 2
     assert total == 2
     assert len(raiz.hijos) == 1
 
     # Empty log
-    r_empty, d_empty, t_empty = _parsear_trazas_instrumentadas("", "factorial")
+    r_empty, d_empty, t_empty, _ = _parsear_trazas_instrumentadas("", "factorial")
     assert r_empty is None
 
 

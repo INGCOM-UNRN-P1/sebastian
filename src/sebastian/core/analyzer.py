@@ -5,13 +5,22 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sebastian.core.masking import enmascarar_comentarios_y_literales
 from sebastian.core.models import DiagnosticoRecursion, NodoLlamada
+
+
+# El árbol se recorre con recursión y se dibuja en la terminal: una recursión infinita llega a
+# cientos de miles de marcos. Los contadores siguen midiendo todo; lo que se recorta es el dibujo.
+PROFUNDIDAD_ARBOL = 50
+NODOS_ARBOL = 2000
+TIEMPO_LIMITE = 3.0
+_TRAZA = re.compile(r"\[SEB:(ENTER|EXIT):(\d+):(\d+)(?::[^\]\n]*)?\]")
 
 
 def extraer_funciones_c(contenido: str) -> List[Tuple[str, str, int, int]]:
@@ -153,13 +162,79 @@ def completar_limite_de_pila(diag: DiagnosticoRecursion) -> None:
     diag.recomendaciones.append(texto)
 
 
-def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[bool]:
+def _compilar_con_daedalus(fuente_inst: Path, binario: Path) -> Optional[Any]:
     try:
         from daedalus.core.compiler import compilar_archivos
     except ImportError:
         return None  # sin el extra `ecosistema` se usa el camino propio
-    res = compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
-    return res.exito
+    return compilar_archivos([fuente_inst], binario_salida=binario, flags_adicionales=["-g", "-O0"])
+
+
+def _errores_traducidos(archivo: Path) -> List[str]:
+    """Los errores de `archivo` explicados por daedalus; vacío si no está o no los reconoce."""
+    with tempfile.TemporaryDirectory() as tmp:
+        res = _compilar_con_daedalus(archivo, Path(tmp) / "prog")
+    if res is None:
+        return []
+    return [f"{archivo.name}:{d.linea}: {d.titulo}. {d.sugerencia}".strip()
+            for d in res.diagnosticos if d.severidad == "error"]
+
+
+def errores_de_compilacion(archivo: Path) -> Optional[List[str]]:
+    """Los errores que impiden compilar `archivo`: vacío si compila, None si no hay gcc para saberlo."""
+    gcc = shutil.which("gcc")
+    if gcc is None:
+        return None
+    res = subprocess.run([gcc, "-std=c11", "-fsyntax-only", str(archivo)], capture_output=True, text=True)
+    if res.returncode == 0:
+        return []
+    crudos = [linea for linea in res.stderr.splitlines() if "error:" in linea]
+    return (_errores_traducidos(archivo) or crudos or res.stderr.splitlines())[:5]
+
+
+def _sin_traza(diag: DiagnosticoRecursion, causa: str, motivo: str) -> DiagnosticoRecursion:
+    diag.origen_medicion = "estatica"
+    diag.causa_sin_medicion = causa
+    diag.motivo_sin_medicion = motivo
+    return diag
+
+
+def _diagnostico_vacio(archivo: Path, funcion: str) -> DiagnosticoRecursion:
+    return DiagnosticoRecursion(funcion=funcion, archivo=archivo, es_recursiva=False,
+                                tipo_recursion="ninguna", tiene_caso_base=True)
+
+
+def _describir_corte(codigo: int, error_tipo: Optional[str]) -> Optional[str]:
+    """Por qué terminó mal el programa; None si terminó solo, con cualquier código propio."""
+    if error_tipo == "TIMEOUT":
+        return f"no terminó en {TIEMPO_LIMITE:.0f} s: ¿un lazo infinito, o está esperando entrada (--stdin)?"
+    if error_tipo == "OOM":
+        return "se quedó sin memoria"
+    numero = -codigo if codigo < 0 else codigo - 128 if codigo > 128 else 0
+    if not numero:
+        return None
+    try:
+        nombre = signal.Signals(numero).name
+    except ValueError:
+        nombre = f"la señal {numero}"
+    if nombre == "SIGSEGV":
+        return "terminó con SIGSEGV: agotó la pila, o accedió a memoria inválida"
+    return f"terminó con {nombre}"
+
+
+def _ejecutar(binario: Path, args: Optional[List[str]], stdin_data: str) -> Tuple[str, Optional[str]]:
+    """Corre el programa instrumentado: (lo que escribió, por qué se cortó)."""
+    aislado = _try_import_nostromo()
+    if aislado:
+        res = aislado(binario, args=args, stdin_texto=stdin_data, timeout_segundos=TIEMPO_LIMITE, memoria_mb=64)
+        return res.stdout, _describir_corte(res.codigo_retorno, res.error_tipo)
+    try:
+        run = subprocess.run([str(binario)] + (args or []), input=stdin_data, capture_output=True, text=True,
+                             timeout=TIEMPO_LIMITE)
+    except subprocess.TimeoutExpired as exc:
+        salida = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        return salida, _describir_corte(0, "TIMEOUT")
+    return run.stdout, _describir_corte(run.returncode, None)
 
 
 def _try_import_nostromo():
@@ -181,6 +256,13 @@ def trazar_recursion_dinamica(
     if not archivo_c.is_file():
         raise FileNotFoundError(f"No se encontró el archivo: {archivo_c}")
 
+    errores = errores_de_compilacion(archivo_c)
+    if errores:
+        diag = _sin_traza(_diagnostico_vacio(archivo_c, funcion_target), "no_compila",
+                          f"{archivo_c.name} no compila: corregí los errores y volvé a trazar.")
+        diag.errores_compilacion = errores
+        return diag
+
     contenido = archivo_c.read_text(encoding="utf-8")
     funciones = extraer_funciones_c(contenido)
 
@@ -191,104 +273,92 @@ def trazar_recursion_dinamica(
             fn_info = (fn_name, cuerpo, l_start)
             break
 
+    if funcion_target and not fn_info:
+        disponibles = ", ".join(f[0] for f in funciones) or "ninguna"
+        return _sin_traza(_diagnostico_vacio(archivo_c, funcion_target), "funcion_inexistente",
+                          f"{archivo_c.name} no define la función '{funcion_target}'. Las que define: {disponibles}.")
+
     if not fn_info:
-        # Fallback: tomar la primera función recursiva que no sea main
+        # Sin --function: la primera función recursiva que no sea main
         for fn_name, cuerpo, l_start, _ in funciones:
             if fn_name != "main" and re.search(rf"\b{fn_name}\s*\(", cuerpo[cuerpo.find('{'):]):
                 fn_info = (fn_name, cuerpo, l_start)
                 break
 
     if not fn_info:
-        diag = DiagnosticoRecursion(
-            funcion=funcion_target,
-            archivo=archivo_c,
-            es_recursiva=False,
-            tipo_recursion="ninguna",
-            tiene_caso_base=True,
-        )
-        return diag
+        return _sin_traza(_diagnostico_vacio(archivo_c, ""), "sin_recursion",
+                          f"{archivo_c.name} no tiene funciones recursivas: indicá con --function cuál querés trazar.")
 
     nombre_fn, cuerpo_fn, l_start = fn_info
     diag_estatico = analizar_estatico_funcion(nombre_fn, cuerpo_fn, archivo_c, l_start)
 
-    # Construir un árbol sintético representativo si no se puede ejecutar dinámicamente
-    # o ejecutar la instrumentación
-    motivo_fallo: Optional[str] = None
+    # Sin una medición real se informa el análisis estático tal cual, sin inventar un árbol: una
+    # profundidad fabricada es indistinguible de una medida y lleva a decisiones equivocadas sobre
+    # el riesgo de desborde de pila.
+    if not any(f[0] == "main" for f in funciones):
+        return _sin_traza(diag_estatico, "sin_main",
+                          f"{archivo_c.name} no tiene main: no hay programa que ejecutar. Agregá uno que llame a "
+                          f"{nombre_fn}() para ver sus llamadas.")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         binario = tmp_path / "prog_instrumentado"
-
-        # Inyectar instrumentación liviana
-        codigo_instrumentado = _generar_codigo_instrumentado(contenido, nombre_fn)
         fuente_inst = tmp_path / "instrumentado.c"
-        fuente_inst.write_text(codigo_instrumentado, encoding="utf-8")
+        fuente_inst.write_text(_generar_codigo_instrumentado(contenido, nombre_fn), encoding="utf-8")
 
-        daed_ok = _compilar_con_daedalus(fuente_inst, binario)
-        comp_ok = False
-        if daed_ok is not None:
-            comp_ok = daed_ok
-        else:
-            gcc = shutil.which("gcc")
-            if gcc:
-                res_comp = subprocess.run(
-                    [gcc, "-g", "-O0", "-std=c11", str(fuente_inst), "-o", str(binario), "-lm"],
-                    capture_output=True,
-                    text=True,
-                )
-                comp_ok = (res_comp.returncode == 0)
+        problema = _compilar_instrumentado(fuente_inst, binario, archivo_c)
+        if problema:
+            return _sin_traza(diag_estatico, *problema)
 
-        if not comp_ok:
-            motivo_fallo = "No se pudo compilar la versión instrumentada de la función."
+        try:
+            salida, corte = _ejecutar(binario, args_programa, stdin_data)
+        except Exception as exc:
+            return _sin_traza(diag_estatico, "fallo_ejecucion", f"No se pudo ejecutar el programa: {exc}")
 
-        if comp_ok:
-            try:
-                nostromo_fn = _try_import_nostromo()
-                if nostromo_fn:
-                    res_aislado = nostromo_fn(
-                        binario,
-                        args=args_programa,
-                        stdin_texto=stdin_data,
-                        timeout_segundos=3.0,
-                        memoria_mb=64,
-                    )
-                    stdout_str = res_aislado.stdout
-                else:
-                    res_run = subprocess.run(
-                        [str(binario)] + (args_programa or []),
-                        input=stdin_data,
-                        capture_output=True,
-                        text=True,
-                        timeout=3,
-                    )
-                    stdout_str = res_run.stdout
+    arbol, max_depth, total_calls, recortado = _parsear_trazas_instrumentadas(
+        salida, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
+    )
+    if not arbol:
+        if corte and "no terminó" in corte:
+            return _sin_traza(diag_estatico, "tiempo_agotado", f"El programa {corte}")
+        if corte:
+            return _sin_traza(diag_estatico, "fallo_ejecucion", f"El programa {corte} antes de llamar a {nombre_fn}().")
+        return _sin_traza(diag_estatico, "sin_llamadas",
+                          f"El programa terminó sin llamar a {nombre_fn}(): revisá que main llegue hasta esa "
+                          "llamada, y si necesita datos pasalos con --stdin o como argumentos.")
 
-                arbol, max_depth, total_calls = _parsear_trazas_instrumentadas(
-                    stdout_str, nombre_fn, frame_bytes=diag_estatico.consumo_stack_por_frame_bytes
-                )
-                if arbol:
-                    diag_estatico.origen_medicion = "dinamica"
-                    diag_estatico.arbol = arbol
-                    diag_estatico.profundidad_maxima = max_depth
-                    diag_estatico.total_llamadas = total_calls
-                    diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
-                    completar_limite_de_pila(diag_estatico)
-                    return diag_estatico
-                motivo_fallo = "La ejecución instrumentada no produjo trazas de llamadas."
-            except Exception as exc:
-                motivo_fallo = f"Falló la ejecución instrumentada: {exc}"
-
-    # Si la instrumentación dinámica no se pudo completar, se informa el análisis
-    # estático tal cual, sin inventar un árbol de dos niveles: una profundidad
-    # fabricada es indistinguible de una medida y sirve para tomar decisiones
-    # equivocadas sobre el riesgo de desborde de pila.
-    diag_estatico.origen_medicion = "estatica"
-    diag_estatico.motivo_sin_medicion = motivo_fallo or "No se pudo instrumentar y ejecutar la función."
-    diag_estatico.arbol = None
-    diag_estatico.profundidad_maxima = 0
-    diag_estatico.total_llamadas = 0
-    diag_estatico.consumo_pico_stack_bytes = 0
+    diag_estatico.origen_medicion = "dinamica"
+    diag_estatico.arbol = arbol
+    diag_estatico.arbol_recortado = recortado
+    diag_estatico.ejecucion_cortada = corte
+    diag_estatico.profundidad_maxima = max_depth
+    diag_estatico.total_llamadas = total_calls
+    diag_estatico.consumo_pico_stack_bytes = max_depth * diag_estatico.consumo_stack_por_frame_bytes
+    completar_limite_de_pila(diag_estatico)
     return diag_estatico
+
+
+def _compilar_instrumentado(fuente: Path, binario: Path, original: Path) -> Optional[Tuple[str, str]]:
+    """Compila la versión instrumentada; (causa, motivo) si no se pudo."""
+    res = _compilar_con_daedalus(fuente, binario)
+    if res is not None:
+        exito, salida = res.exito, res.stderr_crudo
+    else:
+        gcc = shutil.which("gcc")
+        if gcc is None:
+            return "sin_compilador", "Falta gcc: hace falta para ejecutar el programa y trazar sus llamadas."
+        proc = subprocess.run([gcc, "-g", "-O0", "-std=c11", str(fuente), "-o", str(binario), "-lm"],
+                              capture_output=True, text=True)
+        exito, salida = proc.returncode == 0, proc.stderr
+    if exito:
+        return None
+    faltan = sorted(set(re.findall(r"undefined reference to [`'\"](\w+)", salida)))
+    if faltan:
+        return "no_enlaza", (f"{original.name} compila, pero falta el código de {', '.join(faltan)}: sebastian "
+                             "traza un solo archivo, con todo lo que usa definido en él.")
+    primero = next((linea.split("error:", 1)[1].strip() for linea in salida.splitlines() if "error:" in linea), "")
+    return "instrumentacion", (f"{original.name} compila, pero no la copia que sebastian le agrega el registro de "
+                               f"llamadas{': ' + primero if primero else '.'}")
 
 
 def _generar_codigo_instrumentado(codigo_original: str, funcion_target: str) -> str:
@@ -330,28 +400,28 @@ static inline void __seb_enter_hook(const char *fn, int *my_id, int *my_depth) {
 
 def _parsear_trazas_instrumentadas(
     output: str, nombre_fn: str, frame_bytes: int = 32
-) -> Tuple[Optional[NodoLlamada], int, int]:
-    """Reconstruye el árbol de llamadas recursivas a partir del log [SEB:ENTER:id:depth]."""
-    lineas = [l.strip() for l in output.splitlines() if l.startswith("[SEB:")]
-    if not lineas:
-        return None, 0, 0
-
-    pila: List[NodoLlamada] = []
+) -> Tuple[Optional[NodoLlamada], int, int, bool]:
+    """Reconstruye el árbol de llamadas del log [SEB:ENTER:id:depth]: (raíz, profundidad, llamadas,
+    recortado). Busca las marcas en todo el texto: el programa puede haber escrito antes en la misma
+    línea, como un `printf("Ingresá n: ")` sin salto."""
+    pila: List[Optional[NodoLlamada]] = []
     raiz: Optional[NodoLlamada] = None
     max_depth = 0
     total_calls = 0
+    nodos = 0
+    recortado = False
 
-    for l in lineas:
-        partes = l.strip("[]").split(":")
-        tipo = partes[1]
-        call_id = int(partes[2])
-        depth = int(partes[3])
+    for marca in _TRAZA.finditer(output):
+        tipo, call_id, depth = marca.group(1), int(marca.group(2)), int(marca.group(3))
 
         if tipo == "ENTER":
             total_calls += 1
-            if depth > max_depth:
-                max_depth = depth
-
+            max_depth = max(max_depth, depth)
+            padre = pila[-1] if pila else None
+            if depth > PROFUNDIDAD_ARBOL or nodos >= NODOS_ARBOL or (pila and padre is None):
+                recortado = True
+                pila.append(None)  # se cuenta, pero no se dibuja
+                continue
             nodo = NodoLlamada(
                 id=call_id,
                 funcion=nombre_fn,
@@ -359,14 +429,16 @@ def _parsear_trazas_instrumentadas(
                 profundidad=depth,
                 stack_bytes=depth * frame_bytes,
             )
+            nodos += 1
             if not raiz:
                 raiz = nodo
-            if pila:
-                pila[-1].hijos.append(nodo)
+            if padre:
+                padre.hijos.append(nodo)
             pila.append(nodo)
 
-        elif tipo == "EXIT" and pila:
-            nodo = pila.pop()
-            nodo.retorno = "ret"
+        elif pila:
+            nodo_salida = pila.pop()
+            if nodo_salida:
+                nodo_salida.retorno = "ret"
 
-    return raiz, max_depth, total_calls
+    return raiz, max_depth, total_calls, recortado

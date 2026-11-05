@@ -53,7 +53,7 @@ def test_la_recursion_real_se_sigue_detectando(archivo):
 def test_sin_instrumentacion_no_se_fabrica_un_arbol(archivo):
     """SEBASTIAN-D0303: antes devolvía profundidad 2 y 2 llamadas inventadas."""
     with patch("sebastian.core.analyzer.shutil.which", return_value=None), \
-         patch("sebastian.core.analyzer._compilar_con_daedalus", return_value=False):
+         patch("sebastian.core.analyzer._compilar_con_daedalus", return_value=None):
         diagnostico = trazar_recursion_dinamica(archivo, "factorial")
 
     assert diagnostico.origen_medicion == "estatica"
