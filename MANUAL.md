@@ -75,6 +75,8 @@ Ejecuta el código instrumentado, traza las llamadas recursivas y visualiza el �
 | `--function`, `-f` | `Optional[str]` | `None` | Nombre de la función recursiva a trazar. |
 | `--args` | `Optional[List[str]]` | `None` | Argumentos para el programa al ejecutar. |
 | `--stdin`, `-i` | `Optional[str]` | `None` | Entrada estándar para el programa. |
+| `--include`, `-I` | `Optional[List[Path]]` | `None` | Carpeta de headers (se puede repetir). El `include/` del proyecto se detecta solo. |
+| `--source`, `-s` | `Optional[List[Path]]` | `None` | Otro `.c` del programa, como el que tiene `main` (se puede repetir). |
 | `--tree/--no-tree` | `bool` | `True` | Mostrar árbol de llamadas en terminal. |
 | `--mermaid`, `-m` | `bool` | `False` | Emitir diagrama en formato Mermaid. |
 | `--json` | `bool` | `False` | Emitir reporte en formato JSON. |
@@ -83,6 +85,28 @@ Ejecuta el código instrumentado, traza las llamadas recursivas y visualiza el �
 ```bash
 sebastian trace <fuente>
 ```
+
+En un proyecto de varios archivos, la función se traza desde su `.c` y los demás se suman con
+`--source`. Si falta alguno, el mensaje dice cuál:
+
+```bash
+sebastian trace src/lista.c -f invertir_recursivo --source src/main.c --source src/envio.c --stdin "$(cat caso.in)"
+```
+
+Cuando no hay traza, el motivo se muestra en pantalla y en `causa_sin_medicion` del JSON:
+
+| Causa | Qué pasó |
+| :--- | :--- |
+| `no_compila` | Hay errores de compilación; se muestran. |
+| `no_enlaza` | Falta el código de una función, o está definida dos veces. Propone el `--source`. |
+| `sin_main` | Ningún archivo tiene `main`. Propone el vecino que lo tiene. |
+| `funcion_inexistente` | `--function` nombra una función que el archivo no define. |
+| `sin_recursion` | No se encontró recursión, ni directa ni mutua. |
+| `sin_llamadas` | El programa terminó sin llamar a la función; incluye el código de salida y lo último que escribió. |
+| `tiempo_agotado` | El programa no terminó en el tiempo límite. |
+| `fallo_ejecucion` | El programa se cortó antes de llamar a la función, o no se pudo ejecutar. |
+| `sin_compilador` | Falta gcc. |
+| `instrumentacion` | El código compila, pero no la copia con el registro de llamadas. |
 
 ### `sebastian check`
 
@@ -101,6 +125,7 @@ Códigos de salida: 0 análisis correcto, 2 archivo inexistente y, solo con
 | :--- | :--- | :--- | :--- |
 | `--json` | `bool` | `False` | Emitir reporte en JSON. |
 | `--md`, `--output-md`, `-o` | `Optional[Path]` | `None` | Generar sección de reporte en formato Markdown para fusión en Dredd. |
+| `--include`, `-I` | `Optional[List[Path]]` | `None` | Carpeta de headers (se puede repetir). El `include/` del proyecto se detecta solo. |
 | `--fail-on-high-risk` | `bool` | `False` | Salir con código 1 si alguna función tiene riesgo de overflow ALTO (por defecto siempre 0). |
 
 #### Ejemplo de Invocación
@@ -125,6 +150,7 @@ Códigos de salida: 0 análisis correcto, 2 archivo inexistente y, solo con
 | :--- | :--- | :--- | :--- |
 | `--json` | `bool` | `False` | Emitir reporte en JSON. |
 | `--md`, `--output-md`, `-o` | `Optional[Path]` | `None` | Generar sección de reporte en formato Markdown para fusión en Dredd. |
+| `--include`, `-I` | `Optional[List[Path]]` | `None` | Carpeta de headers (se puede repetir). El `include/` del proyecto se detecta solo. |
 | `--fail-on-high-risk` | `bool` | `False` | Salir con código 1 si alguna función tiene riesgo de overflow ALTO (por defecto siempre 0). |
 
 #### Ejemplo de Invocación

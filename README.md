@@ -44,6 +44,9 @@ sebastian trace factorial.c --function factorial
 # 2. Emitir diagrama en sintaxis Mermaid
 sebastian trace fibonacci.c --mermaid
 
+# Programa de varios archivos: el include/ se detecta, los demás .c se suman
+sebastian trace src/lista.c --source src/main.c --source src/envio.c
+
 # 3. Analizar estáticamente todas las funciones de un archivo
 sebastian analyze algoritmo.c
 
