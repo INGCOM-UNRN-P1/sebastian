@@ -11,9 +11,21 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
-from sebastian.core.masking import enmascarar_comentarios_y_literales
 from sebastian.core.models import DiagnosticoRecursion, NodoLlamada
 from sebastian.core.pila import directorios_include
+
+try:
+    from yutani.ts_queries import ejecutar_consulta as _ts_consulta, parsear_c as _ts_parsear, texto_nodo as _ts_texto
+    _TIENE_TS = True
+except ImportError:
+    _TIENE_TS = False
+
+
+def enmascarar_comentarios_y_literales(contenido: str) -> str:
+    """Fallback mínimo si `yutani.ts_queries` no está disponible."""
+    sin_cadenas = re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', lambda m: " " * len(m.group()), contenido)
+    sin_bloque = re.sub(r"/\*.*?\*/", lambda m: "".join("\n" if c == "\n" else " " for c in m.group()), sin_cadenas, flags=re.S)
+    return re.sub(r"//.*", lambda m: " " * len(m.group()), sin_bloque)
 
 
 # El árbol se recorre con recursión y se dibuja en la terminal: una recursión infinita llega a
@@ -27,9 +39,36 @@ _PARAMETROS = r"\((?:[^()]|\([^()]*\))*\)"
 _TITULO_SIN_TRADUCIR = "Diagnóstico del compilador"
 
 
+def _nombre_declarador_fn(node) -> str:
+    actual = node.child_by_field_name("declarator")
+    while actual is not None:
+        if actual.type == "identifier":
+            return _ts_texto(actual)
+        actual = actual.child_by_field_name("declarator")
+    return ""
+
+
 def extraer_funciones_c(contenido: str) -> List[Tuple[str, str, int, int]]:
     """Extrae las funciones definidas en un archivo C: (nombre, cuerpo, linea_inicio, linea_fin)."""
-    # Regex para cabecera de función
+    if _TIENE_TS:
+        raiz = _ts_parsear(contenido, filtrar_if0=True)
+        funciones_ts: List[Tuple[str, str, int, int]] = []
+        for match in _ts_consulta(raiz, "(function_definition) @fn"):
+            for fn in match.get("fn", []):
+                nombre = _nombre_declarador_fn(fn)
+                if not nombre or nombre in ("if", "for", "while", "switch"):
+                    continue
+                funciones_ts.append((
+                    nombre,
+                    _ts_texto(fn),
+                    fn.start_point.row + 1,
+                    fn.end_point.row + 1,
+                ))
+        if funciones_ts:
+            funciones_ts.sort(key=lambda item: item[2])
+            return funciones_ts
+
+    # Fallback regex para fragmentos parciales sin AST válido
     re_fn = re.compile(
         rf"^[ \t]*(?:[a-zA-Z_]\w*[\s*]+)+([a-zA-Z_]\w*)\s*{_PARAMETROS}\s*\{{",
         re.MULTILINE,
@@ -62,12 +101,29 @@ def extraer_funciones_c(contenido: str) -> List[Tuple[str, str, int, int]]:
     return funciones
 
 
+def _llamadas_ast(cuerpo: str) -> Optional[List[str]]:
+    if not _TIENE_TS:
+        return None
+    raiz = _ts_parsear(cuerpo, filtrar_if0=False)
+    llamadas: List[str] = []
+    for match in _ts_consulta(raiz, "(call_expression function: (identifier) @callee)"):
+        for n in match.get("callee", []):
+            nombre = _ts_texto(n)
+            if nombre:
+                llamadas.append(nombre)
+    return llamadas
+
+
 def _llamadas_entre_funciones(funciones: Sequence[Tuple[str, str, int, int]]) -> Dict[str, Set[str]]:
     nombres = {f[0] for f in funciones}
     grafo: Dict[str, Set[str]] = {}
     for nombre, cuerpo, _, _ in funciones:
-        limpio = enmascarar_comentarios_y_literales(cuerpo)
-        grafo[nombre] = (set(re.findall(r"\b([a-zA-Z_]\w*)\s*\(", limpio[limpio.find("{"):])) & nombres) - {nombre}
+        ast_calls = _llamadas_ast(cuerpo)
+        if ast_calls is not None:
+            grafo[nombre] = (set(ast_calls) & nombres) - {nombre}
+        else:
+            limpio = enmascarar_comentarios_y_literales(cuerpo)
+            grafo[nombre] = (set(re.findall(r"\b([a-zA-Z_]\w*)\s*\(", limpio[limpio.find("{"):])) & nombres) - {nombre}
     return grafo
 
 
@@ -117,15 +173,18 @@ def analizar_estatico_funcion(
     puede estar en cualquiera de ellas.
     """
     companeras = companeras or {}
-    # Los comentarios y literales se blanquean antes de buscar: sin esto, el
-    # nombre de la función mencionado en un comentario o en un printf cuenta
-    # como llamada recursiva y la función se reporta como recursiva sin serlo.
     cuerpo_analizable = enmascarar_comentarios_y_literales(cuerpo)
-    nombres = "|".join(re.escape(nombre) for nombre in [nombre_fn, *companeras])
-    patron_llamada = re.compile(rf"\b(?:{nombres})\s*\(")
-    llamadas = list(patron_llamada.finditer(cuerpo_analizable[cuerpo_analizable.find('{'):]))
-
-    es_recursiva = len(llamadas) > 0
+    objetivo = {nombre_fn, *companeras}
+    ast_calls = _llamadas_ast(cuerpo)
+    if ast_calls is not None:
+        total_calls = sum(1 for c in ast_calls if c in objetivo)
+        es_recursiva = total_calls > 0
+    else:
+        nombres = "|".join(re.escape(nombre) for nombre in objetivo)
+        patron_llamada = re.compile(rf"\b(?:{nombres})\s*\(")
+        llamadas = list(patron_llamada.finditer(cuerpo_analizable[cuerpo_analizable.find('{'):]))
+        total_calls = len(llamadas)
+        es_recursiva = total_calls > 0
     if not es_recursiva:
         return DiagnosticoRecursion(
             funcion=nombre_fn,
@@ -144,9 +203,9 @@ def analizar_estatico_funcion(
     )
 
     # Detectar tipo de recursión
-    total_calls = len(llamadas)
+    nombres_re = "|".join(re.escape(nombre) for nombre in objetivo)
     # Recursión de cola (tail call): 'return fn(...);' sin operadores adicionales
-    re_tail = re.compile(rf"return\s+(?:{nombres})\s*\([^;]+\);")
+    re_tail = re.compile(rf"return\s+(?:{nombres_re})\s*\([^;]+\);")
     es_tail = bool(re_tail.search(cuerpo_analizable))
 
     if companeras:
